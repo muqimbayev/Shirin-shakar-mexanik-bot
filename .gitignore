@@ -1,3 +1,6 @@
 .env
-debug_output
-bot_debug
+venv/
+__pycache__/
+*.pyc
+*.log
+debug_output.txt
