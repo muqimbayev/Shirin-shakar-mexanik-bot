@@ -21,13 +21,20 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
     level=logging.INFO,
     handlers=[
-        logging.FileHandler("bot_debug.log"),
+        logging.FileHandler("bot_debug.log", encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
 logger.info(f"Loaded TELEGRAM_GROUP_ID: {TELEGRAM_GROUP_ID}")
+
+def get_ticket_id(ticket: dict) -> str:
+    """Return a clean ticket ID: custom if it looks valid (TS/XXXXX), else DB id."""
+    custom = ticket.get('x_studio_ariza_raqami')
+    if custom and isinstance(custom, str) and custom.startswith('TS/'):
+        return custom
+    return str(ticket.get('id', '?'))
 
 # States for Registration
 FULL_NAME, DEPARTMENT, PHONE_NUMBER = range(3)
@@ -56,7 +63,8 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             f"🆔 <b>ID:</b> {ticket_data.get('x_studio_ariza_raqami', ticket_data['id'])}\n"
             f"👤 <b>Yuboruvchi:</b> {ticket_data.get('sender_name', 'Noma`lum')}\n"
             f"🏢 <b>Bo'lim:</b> {ticket_data.get('department_name', 'Noma`lum')}\n"
-            f"📝 <b>Mavzu:</b> {ticket_data['name']}\n\n"
+            f"📝 <b>Mavzu:</b> {ticket_data['name']}\n"
+            f"🔧 <b>Usta:</b> {ticket_data.get('usta_name', 'Belgilanmagan')}\n\n"
             f"📄 <b>Batafsil:</b> {description}\n\n"
             f"📅 <b>Sana:</b> {ticket_data.get('x_studio_berilgan_sana', 'Noma`lum')}\n"
         )
@@ -304,7 +312,7 @@ async def ticket_team_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     
-    team_id = int(query.data.split('_')[1])
+    team_id = int(query.data.split('_')[-1])
     context.user_data['ticket_team_id'] = team_id
     
     await query.edit_message_text(f"Tanlangan jamoa ID: {team_id}")
@@ -394,15 +402,27 @@ async def ticket_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if tickets_data:
                 t_data = tickets_data[0]
                 
+                # Fetch Usta name from team
+                usta_name = "Belgilanmagan"
+                team_data = t_data.get('team_id')
+                if team_data:
+                    teams = client.execute_kw('helpdesk.team', 'read', [[team_data[0]]], {'fields': ['x_studio_masul_xodim']})
+                    if teams and teams[0].get('x_studio_masul_xodim'):
+                        masul_id = teams[0]['x_studio_masul_xodim'][0]
+                        emp = client.execute_kw('hr.employee', 'read', [[masul_id]], {'fields': ['name']})
+                        if emp:
+                            usta_name = emp[0]['name']
+                
                 # Prepare notification data
                 notif_data = {
                     'id': t_data['id'],
                     'x_studio_ariza_raqami': t_data.get('x_studio_ariza_raqami', t_data['id']),
                     'name': t_data['name'],
-                    'description': context.user_data.get('ticket_description'), # Use original text for better formatting? Or fetched.
+                    'description': context.user_data.get('ticket_description'),
                     'x_studio_berilgan_sana': t_data.get('x_studio_berilgan_sana'),
                     'sender_name': t_data['x_studio_ariza_yuboruvchi'][1] if t_data.get('x_studio_ariza_yuboruvchi') else "Noma'lum",
                     'department_name': t_data['x_studio_bolim'][1] if t_data.get('x_studio_bolim') else "Noma'lum",
+                    'usta_name': usta_name,
                     'photo': photo_data
                 }
                 
@@ -467,8 +487,8 @@ async def show_tickets_page(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     for t in tickets:
         stage = t['stage_id'][1] if t.get('stage_id') else "Yangi"
         date = t.get('x_studio_berilgan_sana', '')
-        # Use custom ticket number if available, else database ID
-        ticket_display_id = t.get('x_studio_ariza_raqami', t['id'])
+        # Use custom ticket number if available and valid, else database ID
+        ticket_display_id = get_ticket_id(t)
         msg += f"🆔 <b>{ticket_display_id}</b> | {date}\n📝 {t['name']}\n📊 Holat: {stage}\n\n"
         
     keyboard = []
@@ -579,13 +599,16 @@ async def show_tasks_page(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         deadline = ticket.get('sla_deadline') or ticket.get('x_studio_muddati') or ""
         icon = "🔴" if deadline else "🟢"
         
-        ticket_id = ticket['id']
-        ticket_number = ticket.get('x_studio_ariza_raqami', ticket_id)
+        ticket_id_display = get_ticket_id(ticket)
+        ticket_db_id = ticket['id']
         
-        msg += f"{icon} <b>{ticket_number}</b> | {ticket['name']}\n"
+        msg += f"{icon} <b>{ticket_id_display}</b> | {ticket['name']}\n"
         
         # Add button to view details
-        keyboard.append([InlineKeyboardButton(f"👁 Ko'rish: {ticket_number}", callback_data=f"usta_task_{ticket_id}")])
+        keyboard.append([InlineKeyboardButton(
+            f"👁 Ko'rish: {ticket_id_display} | {ticket['name'][:20]}",
+            callback_data=f"usta_task_{ticket_db_id}"
+        )])
     
     # Pagination Keyboard
     nav_row = []
@@ -794,6 +817,10 @@ async def usta_deadline_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             if tickets_data:
                 t_data = tickets_data[0]
+                
+                # Fetch Usta name from team
+                usta_name = update.effective_user.full_name  # Person who clicked = usta
+                
                 notif_data = {
                     'id': t_data['id'],
                     'x_studio_ariza_raqami': t_data.get('x_studio_ariza_raqami', t_data['id']),
@@ -801,6 +828,7 @@ async def usta_deadline_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                     'description': t_data.get('description'),
                     'x_studio_berilgan_sana': t_data.get('x_studio_berilgan_sana'),
                     'deadline': deadline,
+                    'usta_name': usta_name,
                     'sender_name': t_data['x_studio_ariza_yuboruvchi'][1] if t_data.get('x_studio_ariza_yuboruvchi') else "Noma'lum",
                     'department_name': t_data['x_studio_bolim'][1] if t_data.get('x_studio_bolim') else "Noma'lum"
                 }
@@ -909,6 +937,10 @@ async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
             if tickets_data:
                 t_data = tickets_data[0]
+                
+                # Usta is the person who solved it
+                usta_name = update.effective_user.full_name
+                
                 notif_data = {
                     'id': t_data['id'],
                     'x_studio_ariza_raqami': t_data.get('x_studio_ariza_raqami', t_data['id']),
@@ -916,9 +948,10 @@ async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     'description': t_data.get('description'),
                     'x_studio_berilgan_sana': t_data.get('x_studio_berilgan_sana'),
                     'report': report_text,
+                    'usta_name': usta_name,
                     'sender_name': t_data['x_studio_ariza_yuboruvchi'][1] if t_data.get('x_studio_ariza_yuboruvchi') else "Noma'lum",
                     'department_name': t_data['x_studio_bolim'][1] if t_data.get('x_studio_bolim') else "Noma'lum",
-                    'photo': photo_data # Use the photo sent in report
+                    'photo': photo_data
                 }
 
                 # Notify Group
@@ -1013,6 +1046,7 @@ async def usta_cancel_reason_input(update: Update, context: ContextTypes.DEFAULT
                     'x_studio_berilgan_sana': t_data.get('x_studio_berilgan_sana'),
                     'cancel_reason': text,
                     'cancelled_by': update.effective_user.full_name,
+                    'usta_name': update.effective_user.full_name, # User who cancelled is the Usta here
                     'sender_name': t_data['x_studio_ariza_yuboruvchi'][1] if t_data.get('x_studio_ariza_yuboruvchi') else "Noma'lum",
                     'department_name': t_data['x_studio_bolim'][1] if t_data.get('x_studio_bolim') else "Noma'lum"
                 }
