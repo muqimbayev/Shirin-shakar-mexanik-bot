@@ -80,6 +80,8 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             msg += f"👤 <b>Bekor qildi:</b> {ticket_data['cancelled_by']}\n"
 
         photo_data_b64 = ticket_data.get('photo', None)
+        file_data_b64 = ticket_data.get('file', None)
+        
         if photo_data_b64:
             try:
                 photo_bytes = base64.b64decode(photo_data_b64)
@@ -91,6 +93,35 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
                 )
             except Exception as e:
                 logger.error(f"Error sending photo in notification: {e}")
+                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
+        elif file_data_b64:
+            try:
+                file_bytes = base64.b64decode(file_data_b64)
+                file_type = ticket_data.get('file_type', 'document')
+                
+                if file_type == 'video':
+                    await context.bot.send_video(
+                        chat_id=chat_id,
+                        video=file_bytes,
+                        caption=msg[:1024],
+                        parse_mode="HTML"
+                    )
+                elif file_type == 'video_note':
+                    await context.bot.send_video_note(
+                        chat_id=chat_id,
+                        video_note=file_bytes
+                    )
+                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
+                else:
+                    await context.bot.send_document(
+                        chat_id=chat_id,
+                        document=file_bytes,
+                        filename="ilova.file",
+                        caption=msg[:1024],
+                        parse_mode="HTML"
+                    )
+            except Exception as e:
+                logger.error(f"Error sending file in notification: {e}")
                 await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
         else:
             await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
@@ -289,57 +320,60 @@ async def create_ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     return TICKET_TITLE
 
 async def ticket_title_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Save title and ask for Team."""
+    """Save title, auto-assign Team, and ask for Description."""
     context.user_data['ticket_title'] = update.message.text
     
     client = OdooClient()
     teams = client.get_helpdesk_teams()
     
     if not teams:
-        await update.message.reply_text("Xatolik: Bo'limlar topilmadi.")
+        await update.message.reply_text("Xatolik: Bo'limlar topilmadi. Arizani kiritishning iloji yo'q.")
         return ConversationHandler.END
         
-    keyboard = []
-    for team in teams:
-        keyboard.append([InlineKeyboardButton(team['name'], callback_data=f"team_{team['id']}")])
-        
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Jamoani tanlang:", reply_markup=reply_markup)
-    return TICKET_TEAM
-
-async def ticket_team_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Save team and ask for Description."""
-    query = update.callback_query
-    await query.answer()
+    # Auto-assign the first team
+    context.user_data['ticket_team_id'] = teams[0]['id']
     
-    team_id = int(query.data.split('_')[-1])
-    context.user_data['ticket_team_id'] = team_id
-    
-    await query.edit_message_text(f"Tanlangan jamoa ID: {team_id}")
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="📄 Ariza matnini batafsil yozing:",
+    await update.message.reply_text(
+        "📄 Ariza matnini batafsil yozing:",
         reply_markup=ReplyKeyboardMarkup([["Bekor qilish"]], resize_keyboard=True, one_time_keyboard=True)
     )
     return TICKET_DESCRIPTION
 
 async def ticket_description_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Save description and ask for Photo."""
+    """Save description and ask for Photo/File."""
     context.user_data['ticket_description'] = update.message.text
     
     await update.message.reply_text(
-        "📸 Rasm yuborishingiz mumkin (yoki 'O'tkazib yuborish' deb yozing/bosing):",
+        "📸 Rasm yoki video yuborishingiz mumkin (yoki 'O'tkazib yuborish' deb yozing/bosing):",
         reply_markup=ReplyKeyboardMarkup([["O'tkazib yuborish"], ["Bekor qilish"]], resize_keyboard=True, one_time_keyboard=True)
     )
     return TICKET_PHOTO
 
 async def ticket_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Save photo (optional) and create ticket."""
+    """Save photo or file (optional) and create ticket."""
     photo_data = None
+    file_data = None
+    file_type = None
+    
     if update.message.photo:
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         photo_data = base64.b64encode(photo_bytes).decode('utf-8')
+    elif update.message.video:
+        vid_file = await update.message.video.get_file()
+        vid_bytes = await vid_file.download_as_bytearray()
+        file_data = base64.b64encode(vid_bytes).decode('utf-8')
+        file_type = 'video'
+    elif update.message.video_note:
+        vid_file = await update.message.video_note.get_file()
+        vid_bytes = await vid_file.download_as_bytearray()
+        file_data = base64.b64encode(vid_bytes).decode('utf-8')
+        file_type = 'video_note'
+    elif update.message.document:
+        doc_file = await update.message.document.get_file()
+        doc_bytes = await doc_file.download_as_bytearray()
+        file_data = base64.b64encode(doc_bytes).decode('utf-8')
+        file_type = 'document'
     
     # Create Ticket
     title = context.user_data.get('ticket_title')
@@ -364,14 +398,15 @@ async def ticket_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         employee_id=employee['id'],
         department_id=employee.get('department_id')[0] if employee.get('department_id') else False,
         date=now,
-        photo_data=photo_data
+        photo_data=photo_data,
+        file_data=file_data
     )
     
     if ticket_number:
         if isinstance(ticket_number, int):
-             msg = f"✅ Ariza qabul qilindi! ID: {ticket_number}"
+             msg = f"✅ Ariza qabul qilindi! Raqami: {ticket_number}"
         else:
-             msg = f"✅ Ariza qabul qilindi! ID: {ticket_number}"
+             msg = f"✅ Ariza qabul qilindi! Raqami: {ticket_number}"
              
         await update.message.reply_text(msg, reply_markup=get_main_menu_keyboard(context))
         
@@ -423,28 +458,16 @@ async def ticket_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     'sender_name': t_data['x_studio_ariza_yuboruvchi'][1] if t_data.get('x_studio_ariza_yuboruvchi') else "Noma'lum",
                     'department_name': t_data['x_studio_bolim'][1] if t_data.get('x_studio_bolim') else "Noma'lum",
                     'usta_name': usta_name,
-                    'photo': photo_data
+                    'photo': photo_data,
+                    'file': file_data,
+                    'file_type': file_type
                 }
                 
                 # Notify Group
                 if TELEGRAM_GROUP_ID:
                     await send_ticket_notification(context, TELEGRAM_GROUP_ID, notif_data, "🆕 <b>Yangi Ariza!</b>")
                     
-                # Notify Usta (Find Team Leader / Masul Xodim)
-                team_id = t_data.get('team_id')
-                if team_id:
-                    # Get Team details to find masul xodim
-                    teams = client.execute_kw('helpdesk.team', 'read', [[team_id[0]]], {'fields': ['x_studio_masul_xodim']})
-                    if teams and teams[0].get('x_studio_masul_xodim'):
-                        masul_id = teams[0]['x_studio_masul_xodim'][0]
-                        # Get Employee Telegram ID
-                        emp = client.execute_kw('hr.employee', 'read', [[masul_id]], {'fields': ['x_studio_telegram_id', 'name']})
-                        if emp and emp[0].get('x_studio_telegram_id'):
-                            tg_id = emp[0]['x_studio_telegram_id']
-                            try:
-                                await send_ticket_notification(context, int(tg_id), notif_data, "🆕 <b>Sizga yangi ariza biriktirildi!</b>")
-                            except Exception as e:
-                                logger.error(f"Failed to notify Usta {tg_id}: {e}")
+                
 
         except Exception as e:
             logger.error(f"Error sending notifications: {e}")
@@ -716,7 +739,7 @@ async def task_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
         msg = (
             f"🛠 <b>Ariza tafsilotlari:</b>\n\n"
-            f"🆔 <b>ID:</b> {ticket.get('x_studio_ariza_raqami', ticket['id'])}\n"
+            f"🆔 <b>Raqami:</b> {ticket.get('x_studio_ariza_raqami', ticket['id'])}\n"
             f"👤 <b>Yuboruvchi:</b> {sender_name}\n"
             f"🏢 <b>Bo'lim:</b> {department}\n"
             f"📞 <b>Tel:</b> {phone}\n"
@@ -1118,14 +1141,13 @@ def main() -> None:
                 MessageHandler(filters.Regex("^Bekor qilish$"), cancel_ticket),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ticket_title_input)
             ],
-            TICKET_TEAM: [CallbackQueryHandler(ticket_team_choice)],
             TICKET_DESCRIPTION: [
                 MessageHandler(filters.Regex("^Bekor qilish$"), cancel_ticket),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ticket_description_input)
             ],
             TICKET_PHOTO: [
                 MessageHandler(filters.Regex("^Bekor qilish$"), cancel_ticket),
-                MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, ticket_photo_input)
+                MessageHandler((filters.TEXT | filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE | filters.Document.ALL) & ~filters.COMMAND, ticket_photo_input)
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel_ticket), MessageHandler(filters.Regex("^Bekor qilish$"), cancel_ticket)],
