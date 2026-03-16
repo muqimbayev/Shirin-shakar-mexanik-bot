@@ -44,7 +44,7 @@ class OdooClient:
     def search_read(self, model, domain, fields, limit=10):
         return self.execute_kw(model, 'search_read', [domain], {'fields': fields, 'limit': limit})
 
-    def create_ticket(self, title, description, team_id, employee_id, department_id, date, photo_data=None, file_data=None):
+    def create_ticket(self, title, description, team_id, employee_id, department_id, date, photo_data=None, file_data=None, priority=None):
         """Create a ticket in Odoo Helpdesk."""
         vals = {
             'name': title, # Title of ticket
@@ -54,6 +54,8 @@ class OdooClient:
             'x_studio_bolim': int(department_id) if department_id else False,
             'x_studio_berilgan_sana': date.strftime('%Y-%m-%d %H:%M:%S') if hasattr(date, 'strftime') else str(date).split('.')[0],
         }
+        if priority:
+            vals['priority'] = str(priority)
         if photo_data:
             vals['x_studio_binary_field_9hi_1jg9o8v5j'] = photo_data
         if file_data:

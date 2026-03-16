@@ -39,13 +39,15 @@ def get_ticket_id(ticket: dict) -> str:
 # States for Registration
 FULL_NAME, DEPARTMENT, PHONE_NUMBER = range(3)
 # States for Ticket Creation
-TICKET_TITLE, TICKET_TEAM, TICKET_DESCRIPTION, TICKET_PHOTO = range(3, 7)
+TICKET_TITLE, TICKET_PRIORITY, TICKET_TEAM, TICKET_DESCRIPTION, TICKET_PHOTO = range(3, 8)
 # States for Usta Workflow
-USTA_DEADLINE, USTA_REPORT, USTA_PHOTO, USTA_CANCEL_REASON = range(7, 11)
+USTA_DEADLINE, USTA_REPORT, USTA_PHOTO, USTA_CANCEL_REASON = range(8, 12)
+# States for Rating System
+TICKET_RATING, TICKET_COMMENT = range(12, 14)
 
 ITEMS_PER_PAGE = 5
 
-async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ticket_data: dict, status_msg: str):
+async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ticket_data: dict, status_msg: str, reply_markup=None):
     """Helper to send ticket notifications with consistent formatting."""
     logger.info(f"Preparing to send notification to {chat_id} with status {status_msg}")
     try:
@@ -57,6 +59,19 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
         description = ticket_data.get('description', 'Izoh yo`q')
         if description:
              description = clean_html(description)
+        
+        priority = ticket_data.get('priority')
+        emodji = 'Muhumlik darajasi:'
+        if priority == '1':
+            priority = 'Taklif'
+            emodji = '🟢 Muhumlik darajasi:'
+        elif priority == '2':
+            priority = 'Shoshilinch emas'
+            emodji = '🟡 Muhumlik darajasi:'
+        elif priority == '3':
+            priority = 'Zarur'
+            emodji = '🔴 Muhumlik darajasi:'
+
 
         msg = (
             f"{status_msg}\n\n"
@@ -65,7 +80,9 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             f"🏢 <b>Bo'lim:</b> {ticket_data.get('department_name', 'Noma`lum')}\n"
             f"📝 <b>Mavzu:</b> {ticket_data['name']}\n"
             f"🔧 <b>Usta:</b> {ticket_data.get('usta_name', 'Belgilanmagan')}\n\n"
+            f"<b>{emodji}</b> {priority}\n"
             f"📄 <b>Batafsil:</b> {description}\n\n"
+    
             f"📅 <b>Sana:</b> {ticket_data.get('x_studio_berilgan_sana', 'Noma`lum')}\n"
         )
         
@@ -78,6 +95,8 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             msg += f"🚫 <b>Sabab:</b> {ticket_data['cancel_reason']}\n"
         if ticket_data.get('cancelled_by'):
             msg += f"👤 <b>Bekor qildi:</b> {ticket_data['cancelled_by']}\n"
+        if ticket_data.get('x_studio_bajarilgan_vaqti'):
+            msg += f"🏁 <b>Bajarilgan vaqti:</b> {ticket_data['x_studio_bajarilgan_vaqti']}\n"
 
         photo_data_b64 = ticket_data.get('photo', None)
         file_data_b64 = ticket_data.get('file', None)
@@ -89,7 +108,8 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
                     chat_id=chat_id,
                     photo=photo_bytes,
                     caption=msg[:1024],
-                    parse_mode="HTML"
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
                 )
             except Exception as e:
                 logger.error(f"Error sending photo in notification: {e}")
@@ -104,7 +124,8 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
                         chat_id=chat_id,
                         video=file_bytes,
                         caption=msg[:1024],
-                        parse_mode="HTML"
+                        parse_mode="HTML",
+                        reply_markup=reply_markup
                     )
                 elif file_type == 'video_note':
                     await context.bot.send_video_note(
@@ -118,13 +139,14 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
                         document=file_bytes,
                         filename="ilova.file",
                         caption=msg[:1024],
-                        parse_mode="HTML"
+                        parse_mode="HTML",
+                        reply_markup=reply_markup
                     )
             except Exception as e:
                 logger.error(f"Error sending file in notification: {e}")
                 await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
         else:
-            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
+            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML", reply_markup=reply_markup)
             
     except Exception as e:
         logger.error(f"Error sending notification to {chat_id}: {e}")
@@ -338,7 +360,7 @@ async def ticket_title_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=ReplyKeyboardMarkup([["Bekor qilish"]], resize_keyboard=True, one_time_keyboard=True)
     )
     return TICKET_DESCRIPTION
-
+    
 async def ticket_description_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Save description and ask for Photo/File."""
     context.user_data['ticket_description'] = update.message.text
@@ -350,42 +372,66 @@ async def ticket_description_input(update: Update, context: ContextTypes.DEFAULT
     return TICKET_PHOTO
 
 async def ticket_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Save photo or file (optional) and create ticket."""
+    """Save photo or file (optional) and ask for priority."""
     photo_data = None
     file_data = None
     file_type = None
     
-    if update.message.photo:
+    if getattr(update.message, 'photo', None) and update.message.photo:
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         photo_data = base64.b64encode(photo_bytes).decode('utf-8')
-    elif update.message.video:
+    elif getattr(update.message, 'video', None) and update.message.video:
         vid_file = await update.message.video.get_file()
         vid_bytes = await vid_file.download_as_bytearray()
         file_data = base64.b64encode(vid_bytes).decode('utf-8')
         file_type = 'video'
-    elif update.message.video_note:
+    elif getattr(update.message, 'video_note', None) and update.message.video_note:
         vid_file = await update.message.video_note.get_file()
         vid_bytes = await vid_file.download_as_bytearray()
         file_data = base64.b64encode(vid_bytes).decode('utf-8')
         file_type = 'video_note'
-    elif update.message.document:
+    elif getattr(update.message, 'document', None) and update.message.document:
         doc_file = await update.message.document.get_file()
         doc_bytes = await doc_file.download_as_bytearray()
         file_data = base64.b64encode(doc_bytes).decode('utf-8')
         file_type = 'document'
+        
+    context.user_data['ticket_photo'] = photo_data
+    context.user_data['ticket_file'] = file_data
+    context.user_data['ticket_file_type'] = file_type
+    
+    keyboard = [
+        [InlineKeyboardButton("🔴 Zarur", callback_data="priority_3"), 
+         InlineKeyboardButton("🟡 Shoshilinch emas", callback_data="priority_2")],
+        [InlineKeyboardButton("🟢 Taklif", callback_data="priority_1")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Reply Keyboard Remove to hide the custom keyboard
+    await update.message.reply_text("Zaruriyat darajasini tanlang:", reply_markup=reply_markup)
+    return TICKET_PRIORITY
+
+async def ticket_priority_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    priority = query.data.split('_')[1]
     
     # Create Ticket
     title = context.user_data.get('ticket_title')
     team_id = context.user_data.get('ticket_team_id')
     description = context.user_data.get('ticket_description')
+    photo_data = context.user_data.get('ticket_photo')
+    file_data = context.user_data.get('ticket_file')
+    file_type = context.user_data.get('ticket_file_type')
     user = update.effective_user
     
     client = OdooClient()
     employee = client.get_employee_by_telegram_id(user.id)
     
     if not employee:
-        await update.message.reply_text("Xatolik: Foydalanuvchi topilmadi.")
+        await query.edit_message_text("Xatolik: Foydalanuvchi topilmadi.")
         return ConversationHandler.END
     
     import datetime
@@ -399,7 +445,8 @@ async def ticket_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         department_id=employee.get('department_id')[0] if employee.get('department_id') else False,
         date=now,
         photo_data=photo_data,
-        file_data=file_data
+        file_data=file_data,
+        priority=priority
     )
     
     if ticket_number:
@@ -408,7 +455,8 @@ async def ticket_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
              msg = f"✅ Ariza qabul qilindi! Raqami: {ticket_number}"
              
-        await update.message.reply_text(msg, reply_markup=get_main_menu_keyboard(context))
+        await query.delete_message()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, reply_markup=get_main_menu_keyboard(context))
         
         # --- Notifications ---
         try:
@@ -431,7 +479,7 @@ async def ticket_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             tickets_data = client.execute_kw(
                 'helpdesk.ticket', 'search_read',
                 [domain],
-                {'fields': ['id', 'name', 'x_studio_ariza_raqami', 'description', 'x_studio_berilgan_sana', 'team_id', 'x_studio_ariza_yuboruvchi', 'x_studio_bolim'], 'limit': 1}
+                {'fields': ['id', 'name', 'x_studio_ariza_raqami', 'description', 'x_studio_berilgan_sana', 'team_id', 'x_studio_ariza_yuboruvchi', 'x_studio_bolim', 'priority'], 'limit': 1}
             )
             
             if tickets_data:
@@ -460,7 +508,8 @@ async def ticket_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     'usta_name': usta_name,
                     'photo': photo_data,
                     'file': file_data,
-                    'file_type': file_type
+                    'file_type': file_type,
+                    'priority': t_data.get('priority')
                 }
                 
                 # Notify Group
@@ -473,7 +522,8 @@ async def ticket_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.error(f"Error sending notifications: {e}")
 
     else:
-        await update.message.reply_text("❌ Xatolik yuz berdi. Qaytadan urining.", reply_markup=get_main_menu_keyboard(context))
+        await query.edit_message_text("❌ Xatolik yuz berdi. Qaytadan urining.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="...", reply_markup=get_main_menu_keyboard(context))
         
     return ConversationHandler.END
 
@@ -577,7 +627,7 @@ async def show_task_categories(update: Update, context: ContextTypes.DEFAULT_TYP
             counts[stage[0]] = item.get('stage_id_count', 0)
             
     categories = [
-        (1, "🆕 Yangi"),
+        (7, "🆕 Biriktirilgan"),
         (2, "⏳ Jarayonda"),
         (4, "✅ Hal qilingan"),
         (5, "🚫 Bekor qilingan")
@@ -591,7 +641,7 @@ async def show_task_categories(update: Update, context: ContextTypes.DEFAULT_TYP
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    msg = "📂 Arizalar bo'limini tanlang:"
+    msg = "📂 Arizalar statusini tanlang:"
     if update.callback_query:
         await update.callback_query.edit_message_text(msg, reply_markup=reply_markup)
     else:
@@ -626,10 +676,10 @@ async def show_tasks_page(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         ticket_db_id = ticket['id']
         
         msg += f"{icon} <b>{ticket_id_display}</b> | {ticket['name']}\n"
-        
+        bolim = ticket['x_studio_bolim']
         # Add button to view details
         keyboard.append([InlineKeyboardButton(
-            f"👁 Ko'rish: {ticket_id_display} | {ticket['name'][:20]}",
+            f"👁 {ticket_id_display} | {bolim[1][:20]}",
             callback_data=f"usta_task_{ticket_db_id}"
         )])
     
@@ -752,14 +802,10 @@ async def task_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
         keyboard = []
         # Action Buttons
-        if stage_id == 1: # New
+        active_stages = ["Yangi", "New", "Biriktirilgan", "Jarayonda", "In Progress"]
+        if stage_name in active_stages or stage_name not in ["Hal qilingan", "Solved", "Bekor qilingan", "Cancelled"]:
             keyboard.append([
-                InlineKeyboardButton("▶️ Bajarishga olish", callback_data=f"usta_start_{ticket_id}"),
-                InlineKeyboardButton("🚫 Bekor qilish", callback_data=f"usta_cancel_{ticket_id}")
-            ])
-        elif stage_id == 2: # In Progress
-            keyboard.append([
-                InlineKeyboardButton("✅ Hal qilish", callback_data=f"usta_solve_{ticket_id}"),
+                InlineKeyboardButton("▶️ Bajarish", callback_data=f"usta_solve_{ticket_id}"),
                 InlineKeyboardButton("🚫 Bekor qilish", callback_data=f"usta_cancel_{ticket_id}")
             ])
             
@@ -909,36 +955,63 @@ async def usta_report_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data['usta_report_text'] = text
     
     await update.message.reply_text(
-        "Bajarilgan ish rasmini yuklang:",
+        "Bajarilgan ish rasmini yoki videosini yuklang:",
         reply_markup=ReplyKeyboardMarkup([["O'tkazib yuborish"], ["Bekor qilish"]], resize_keyboard=True)
     )
     return USTA_PHOTO
 
 async def usta_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Save photo and finish."""
-    photo_data = None
+    """Save photo/video and finish."""
+    file_data = None
+    file_type = None
+    
     if update.message.photo:
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
-        photo_data = base64.b64encode(photo_bytes).decode('utf-8')
+        file_data = base64.b64encode(photo_bytes).decode('utf-8')
+        file_type = 'photo'
+    elif update.message.video:
+        vid_file = await update.message.video.get_file()
+        vid_bytes = await vid_file.download_as_bytearray()
+        file_data = base64.b64encode(vid_bytes).decode('utf-8')
+        file_type = 'video'
+    elif update.message.video_note:
+        vid_file = await update.message.video_note.get_file()
+        vid_bytes = await vid_file.download_as_bytearray()
+        file_data = base64.b64encode(vid_bytes).decode('utf-8')
+        file_type = 'video_note'
+    elif update.message.document:
+        doc_file = await update.message.document.get_file()
+        doc_bytes = await doc_file.download_as_bytearray()
+        file_data = base64.b64encode(doc_bytes).decode('utf-8')
+        file_type = 'document'
     
-    return await finish_solve_task(update, context, photo_data)
+    return await finish_solve_task(update, context, file_data, file_type)
 
 async def usta_skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    return await finish_solve_task(update, context, None)
+    return await finish_solve_task(update, context, None, None)
 
-async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, photo_data) -> int:
+async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, file_data, file_type) -> int:
     ticket_id = context.user_data.get('usta_ticket_id')
     report_text = context.user_data.get('usta_report_text')
     
     client = OdooClient()
+    
+    import datetime
+    now_utc = datetime.datetime.utcnow()
+    bajarilgan_vaqti_odoo = now_utc.strftime('%Y-%m-%d %H:%M:%S')
+    local_offset = datetime.timedelta(hours=5)
+    now_local = now_utc + local_offset
+    bajarilgan_vaqti_tg = now_local.strftime('%Y-%m-%d %H:%M:%S')
+
     # Stage 4 = Solved/Hal qilingan
     vals = {
         'stage_id': 4,
-        'x_studio_matn': report_text
+        'x_studio_matn': report_text,
+        'x_studio_bajarilgan_vaqti': bajarilgan_vaqti_odoo
     }
-    if photo_data:
-        vals['x_studio_rasm'] = photo_data
+    if file_data:
+        vals['x_studio_rasm'] = file_data
         
     try:
         client.update_ticket(ticket_id, vals)
@@ -954,7 +1027,7 @@ async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             tickets_data = client.execute_kw(
                 'helpdesk.ticket', 'search_read',
                 [[('id', '=', ticket_id)]],
-                {'fields': ['id', 'name', 'x_studio_ariza_raqami', 'description', 'x_studio_berilgan_sana', 'team_id', 'x_studio_ariza_yuboruvchi', 'x_studio_bolim'], 'limit': 1}
+                {'fields': ['id', 'name', 'x_studio_ariza_raqami', 'description', 'x_studio_berilgan_sana', 'team_id', 'x_studio_ariza_yuboruvchi', 'x_studio_bolim', 'priority'], 'limit': 1}
             )
             logger.info(f"Fetched ticket data: {tickets_data}")
 
@@ -974,13 +1047,18 @@ async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     'usta_name': usta_name,
                     'sender_name': t_data['x_studio_ariza_yuboruvchi'][1] if t_data.get('x_studio_ariza_yuboruvchi') else "Noma'lum",
                     'department_name': t_data['x_studio_bolim'][1] if t_data.get('x_studio_bolim') else "Noma'lum",
-                    'photo': photo_data
-                }
+                    'photo':  file_data if file_type == 'photo' else None,
+                    'file': file_data if file_type != 'photo' else None,
+                    'file_type': file_type,
+                    'priority': t_data.get('priority'),
+                    'x_studio_bajarilgan_vaqti': bajarilgan_vaqti_tg
+                 }
 
                 # Notify Group
                 if TELEGRAM_GROUP_ID:
                     logger.info(f"Sending solve notification to Group: {TELEGRAM_GROUP_ID}")
                     await send_ticket_notification(context, TELEGRAM_GROUP_ID, notif_data, "✅ <b>Ariza hal qilindi!</b>")
+
                 else:
                     logger.warning("TELEGRAM_GROUP_ID not set!")
 
@@ -996,7 +1074,22 @@ async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     if emp and emp[0].get('x_studio_telegram_id'):
                         tg_id = emp[0]['x_studio_telegram_id']
                         logger.info(f"Sending solve notification to Sender Telegram ID: {tg_id}")
-                        await send_ticket_notification(context, int(tg_id), notif_data, "✅ <b>Arizangiz hal qilindi!</b>")
+                        
+                        # Rating Keyboard
+                        rating_keyboard = [
+                            [InlineKeyboardButton("1. Muammo hal qilinmadi", callback_data=f"rate_1_{ticket_id}")],
+                            [InlineKeyboardButton("2. Juda sekin yoki sifatsiz", callback_data=f"rate_2_{ticket_id}")],
+                            [InlineKeyboardButton("3. O'rtacha", callback_data=f"rate_3_{ticket_id}")],
+                            [InlineKeyboardButton("4. Muammo tez hal qilindi", callback_data=f"rate_4_{ticket_id}")],
+                            [InlineKeyboardButton("5. Juda tez va professional", callback_data=f"rate_5_{ticket_id}")]
+                        ]
+                        reply_markup = InlineKeyboardMarkup(rating_keyboard)
+                        
+                        await send_ticket_notification(
+                            context, int(tg_id), notif_data, 
+                            "✅ <b>Arizangiz hal qilindi!</b>\nIltimos, ishni baholang:", 
+                            reply_markup=reply_markup
+                        )
                     else:
                         logger.warning(f"Sender {sender_id} has no Telegram ID linked.")
                         
@@ -1055,7 +1148,7 @@ async def usta_cancel_reason_input(update: Update, context: ContextTypes.DEFAULT
             tickets_data = client.execute_kw(
                 'helpdesk.ticket', 'search_read',
                 [[('id', '=', ticket_id)]],
-                {'fields': ['id', 'name', 'x_studio_ariza_raqami', 'description', 'x_studio_berilgan_sana', 'team_id', 'x_studio_ariza_yuboruvchi', 'x_studio_bolim'], 'limit': 1}
+                {'fields': ['id', 'name', 'x_studio_ariza_raqami', 'description', 'x_studio_berilgan_sana', 'team_id', 'x_studio_ariza_yuboruvchi', 'x_studio_bolim', 'priority'], 'limit': 1}
             )
             logger.info(f"Fetched ticket data: {tickets_data}")
             
@@ -1071,7 +1164,8 @@ async def usta_cancel_reason_input(update: Update, context: ContextTypes.DEFAULT
                     'cancelled_by': update.effective_user.full_name,
                     'usta_name': update.effective_user.full_name, # User who cancelled is the Usta here
                     'sender_name': t_data['x_studio_ariza_yuboruvchi'][1] if t_data.get('x_studio_ariza_yuboruvchi') else "Noma'lum",
-                    'department_name': t_data['x_studio_bolim'][1] if t_data.get('x_studio_bolim') else "Noma'lum"
+                    'department_name': t_data['x_studio_bolim'][1] if t_data.get('x_studio_bolim') else "Noma'lum",
+                    'priority': t_data['priority']
                 }
 
                 # Notify Group
@@ -1108,6 +1202,108 @@ async def usta_cancel_reason_input(update: Update, context: ContextTypes.DEFAULT
         
     return ConversationHandler.END
 
+    return ConversationHandler.END
+
+async def ticket_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle rating selection from the requester."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Data format: rate_{rating}_{ticket_id}
+    data_parts = query.data.split("_")
+    rating = data_parts[1]
+    ticket_id = data_parts[2]
+    
+    # Store in context
+    context.user_data['rate_ticket_id'] = ticket_id
+    context.user_data['rate_value'] = rating
+    
+    # Check if already rated in Odoo to prevent double rating
+    client = OdooClient()
+    ticket_info = client.execute_kw('helpdesk.ticket', 'read', [[int(ticket_id)]], {'fields': ['x_studio_baho']})
+    if ticket_info and ticket_info[0].get('x_studio_baho'):
+        msg = "Siz ushbu ariza uchun allaqachon baho bergansiz. Rahmat!"
+        try:
+            if query.message.text:
+                await query.edit_message_text(msg)
+            else:
+                await query.edit_message_caption(caption=msg)
+        except Exception:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+        return ConversationHandler.END
+
+    rating_labels = {
+        '1': "1. Muammo hal qilinmadi",
+        '2': "2. Juda sekin yoki sifatsiz",
+        '3': "3. O'rtacha",
+        '4': "4. Muammo tez hal qilindi",
+        '5': "5. Juda tez va professional"
+    }
+    label = rating_labels.get(rating, rating)
+    msg_text = f"Siz <b>{label}</b> bahosini tanladingiz.\n\nIltimos, ish haqida izohingizni ham yozib qoldiring:"
+
+    # Remove the rating keyboard from the original message (to prevent double clicks)
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception as e:
+        logger.warning(f"Could not remove reply markup: {e}")
+
+    # Send a FRESH text message for the comment (so media from notification is not carried over)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=msg_text,
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("Bekor qilish")]], resize_keyboard=True)
+    )
+    return TICKET_COMMENT
+
+async def ticket_comment_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Save rating and comment to Odoo."""
+    comment = update.message.text
+    if comment == "Bekor qilish":
+        await update.message.reply_text("Baholash bekor qilindi.", reply_markup=get_main_menu_keyboard(context))
+        return ConversationHandler.END
+
+    ticket_id = context.user_data.get('rate_ticket_id')
+    rating = context.user_data.get('rate_value')
+    
+    logger.info(f"Attempting to save rating {rating} and comment for ticket {ticket_id}")
+    
+    if not ticket_id or not rating:
+        logger.error("Missing ticket_id or rating in context.user_data")
+        await update.message.reply_text("Xatolik yuz berdi. Qaytadan urinib ko'ring.", reply_markup=get_main_menu_keyboard(context))
+        return ConversationHandler.END
+        
+    client = OdooClient()
+    # Odoo selection values for x_studio_baho: 1 is "1", 2-5 have dots "2.", "3.", etc.
+    odoo_rating_map = {
+        '1': '1',
+        '2': '2.',
+        '3': '3.',
+        '4': '4.',
+        '5': '5.'
+    }
+    odoo_rating = odoo_rating_map.get(rating, rating)
+    
+    vals = {
+        'x_studio_baho': odoo_rating,
+        'x_studio_izoh': comment
+    }
+    
+    try:
+        logger.info(f"Sending update to Odoo: {vals}")
+        success = client.update_ticket(int(ticket_id), vals)
+        if success:
+            logger.info("Successfully updated Odoo with rating/comment.")
+            await update.message.reply_text("Bahoyingiz va izohingiz uchun rahmat!", reply_markup=get_main_menu_keyboard(context))
+        else:
+            logger.error("Odoo update_ticket returned False")
+            await update.message.reply_text("Bahoni saqlashda xatolik yuz berdi (Odoo reject).", reply_markup=get_main_menu_keyboard(context))
+    except Exception as e:
+        logger.error(f"Error saving rating for ticket {ticket_id}: {e}")
+        await update.message.reply_text("Bahoni saqlashda xatolik yuz berdi.", reply_markup=get_main_menu_keyboard(context))
+        
+    return ConversationHandler.END
+
 async def cancel_usta_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Bekor qilindi.", reply_markup=get_main_menu_keyboard(context))
     return ConversationHandler.END
@@ -1118,7 +1314,7 @@ def main() -> None:
         logger.error("TELEGRAM_BOT_TOKEN is not set in .env file.")
         return
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(60).write_timeout(60).connect_timeout(60).build()
 
     # Add conversation handler with the states
     conv_handler = ConversationHandler(
@@ -1140,6 +1336,9 @@ def main() -> None:
             TICKET_TITLE: [
                 MessageHandler(filters.Regex("^Bekor qilish$"), cancel_ticket),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ticket_title_input)
+            ],
+            TICKET_PRIORITY: [
+                CallbackQueryHandler(ticket_priority_choice, pattern="^priority_")
             ],
             TICKET_DESCRIPTION: [
                 MessageHandler(filters.Regex("^Bekor qilish$"), cancel_ticket),
@@ -1183,6 +1382,17 @@ def main() -> None:
         fallbacks=[CommandHandler("cancel", cancel_usta_flow)],
     )
     application.add_handler(usta_conv_handler)
+
+    # Rating System Conversation
+    rating_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(ticket_rating_callback, pattern="^rate_")],
+        states={
+            TICKET_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ticket_comment_input)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_usta_flow)], # Reuse cancel or define new one
+        allow_reentry=True
+    )
+    application.add_handler(rating_conv_handler)
     
     application.run_polling()
 
