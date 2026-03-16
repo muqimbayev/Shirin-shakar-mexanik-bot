@@ -37,7 +37,7 @@ def get_ticket_id(ticket: dict) -> str:
     return str(ticket.get('id', '?'))
 
 # States for Registration
-FULL_NAME, DEPARTMENT, PHONE_NUMBER = range(3)
+PHONE_NUMBER = 0
 # States for Ticket Creation
 TICKET_TITLE, TICKET_PRIORITY, TICKET_TEAM, TICKET_DESCRIPTION, TICKET_PHOTO = range(3, 8)
 # States for Usta Workflow
@@ -210,89 +210,16 @@ async def phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return ConversationHandler.END
     else:
-        # Not found: Proceed to Registration
-        context.user_data['phone_number'] = phone_number
+        # Not found: Deny access
         await update.message.reply_text(
-            "Tizimda ushbu raqamga ega xodim topilmadi.\n"
-            "Iltimos, ro'yxatdan o'tish uchun Ism va Familiyangizni kiriting:",
+            "Kechirasiz, sizning telefon raqamingiz tizimda topilmadi. "
+            "Botdan foydalanish uchun xodimlar ro'yxatiga qo'shilishingiz kerak. "
+            "Iltimos, administrator bilan bog'laning.",
             reply_markup=ReplyKeyboardRemove()
         )
-        return FULL_NAME
-
-async def full_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Save name and ask for department."""
-    user_name = update.message.text
-    context.user_data['full_name'] = user_name
-    
-    client = OdooClient()
-    departments = client.get_departments() # Root departments
-    
-    if not departments:
-        # Fallback if no departments found
-        await update.message.reply_text("Bo'limlar topilmadi. Iltimos administratorga murojaat qiling.")
         return ConversationHandler.END
-        
-    keyboard = []
-    for dept in departments:
-        keyboard.append([InlineKeyboardButton(dept['name'], callback_data=f"dept_{dept['id']}")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        f"Rahmat, {user_name}. Endi bo'limingizni tanlang:",
-        reply_markup=reply_markup
-    )
-    return DEPARTMENT
 
-async def department_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle department selection (drill down or confirm)."""
-    query = update.callback_query
-    await query.answer()
-    
-    dept_id = int(query.data.split('_')[1])
-    client = OdooClient()
-    
-    # Check for sub-departments
-    sub_departments = client.get_departments(parent_id=dept_id)
-    
-    if sub_departments:
-        # Show sub-departments
-        keyboard = []
-        for dept in sub_departments:
-            keyboard.append([InlineKeyboardButton(dept['name'], callback_data=f"dept_{dept['id']}")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            text="Iltimos, quyi bo'limni tanlang:",
-            reply_markup=reply_markup
-        )
-        return DEPARTMENT # Stay in this state
-    else:
-        # No more sub-departments, selection final
-        dept_id = int(query.data.split('_')[1])
-        # We need to ensure we have phone number and name
-        phone_number = context.user_data.get('phone_number')
-        name = context.user_data.get('full_name')
-        telegram_id = update.effective_user.id
-        
-        if not phone_number or not name:
-            await query.edit_message_text("Xatolik: Ma'lumotlar yetarli emas. Iltimos /start bosib qaytadan urining.")
-            return ConversationHandler.END
-             
-        # Create Employee
-        try:
-            client.create_employee(name, dept_id, phone_number, telegram_id)
-            await query.delete_message()
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="Muvaffaqiyatli ro'yxatdan o'tdingiz!",
-                reply_markup=get_main_menu_keyboard(context)
-            )
-        except Exception as e:
-            logger.error(f"Error creating employee: {e}")
-            await query.edit_message_text("Ro'yxatdan o'tishda xatolik yuz berdi.")
-            
-        return ConversationHandler.END
+
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancel and end the conversation."""
@@ -1252,6 +1179,7 @@ async def ticket_rating_callback(update: Update, context: ContextTypes.DEFAULT_T
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=msg_text,
+        parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("Bekor qilish")]], resize_keyboard=True)
     )
     return TICKET_COMMENT
@@ -1320,8 +1248,6 @@ def main() -> None:
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, full_name_input)],
-            DEPARTMENT: [CallbackQueryHandler(department_choice)],
             PHONE_NUMBER: [MessageHandler(filters.CONTACT, phone_input)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
