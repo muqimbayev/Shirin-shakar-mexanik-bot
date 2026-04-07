@@ -1,5 +1,6 @@
 import xmlrpc.client
 import logging
+import re
 from config import ODOO_URL, ODOO_DB, ODOO_USER, ODOO_PASSWORD
 
 logger = logging.getLogger(__name__)
@@ -20,9 +21,8 @@ class OdooClient:
             if self.uid:
                 logger.info(f"Successfully authenticated with Odoo. UID: {self.uid}")
                 return True
-            else:
-                logger.error("Authentication failed. Check credentials.")
-                return False
+            logger.error("Authentication failed.")
+            return False
         except Exception as e:
             logger.error(f"Error connecting to Odoo: {e}")
             return False
@@ -31,173 +31,116 @@ class OdooClient:
         if not self.uid:
             if not self.authenticate():
                 return None
-        
         if kwargs is None:
             kwargs = {}
-            
         try:
             return self.models.execute_kw(self.db, self.uid, self.password, model, method, args, kwargs)
         except Exception as e:
-            logger.error(f"Error executing method {method} on model {model}: {e}")
+            logger.error(f"Error executing {method} on {model}: {e}")
             return None
 
     def search_read(self, model, domain, fields, limit=10):
         return self.execute_kw(model, 'search_read', [domain], {'fields': fields, 'limit': limit})
 
-    def create_ticket(self, title, description, team_id, employee_id, department_id, date, photo_data=None, file_data=None, priority=None):
-        """Create a ticket in Odoo Helpdesk."""
+    # --- REPAIR ORDER ---
+
+    def create_repair(self, title, description, employee_id, department_id, photo_data=None, file_data=None, file_name=None, priority=None):
+        """Create a repair order in Odoo."""
         vals = {
-            'name': title, # Title of ticket
-            'team_id': int(team_id),
-            'description': description, # Description body
-            'x_studio_ariza_yuboruvchi': int(employee_id),
-            'x_studio_bolim': int(department_id) if department_id else False,
-            'x_studio_berilgan_sana': date.strftime('%Y-%m-%d %H:%M:%S') if hasattr(date, 'strftime') else str(date).split('.')[0],
+            'application_name': title,
+            'applicant': int(employee_id),
+            'department': int(department_id) if department_id else False,
+            'application_description': description or '',
         }
         if priority:
-            vals['priority'] = str(priority)
+            vals['priority_custom'] = str(priority)
         if photo_data:
-            vals['x_studio_binary_field_9hi_1jg9o8v5j'] = photo_data
-        if file_data:
-            vals['x_studio_fayl'] = file_data
-            
-        ticket_id = self.execute_kw('helpdesk.ticket', 'create', [vals])
-        
-        # Fetch the custom ticket number (x_studio_ariza_raqami)
-        if ticket_id:
-            try:
-                result = self.search_read('helpdesk.ticket', [('id', '=', ticket_id)], ['x_studio_ariza_raqami'], limit=1)
-                if result and result[0].get('x_studio_ariza_raqami'):
-                    return result[0]['x_studio_ariza_raqami']
-            except Exception as e:
-                logger.error(f"Error fetching ticket number for ID {ticket_id}: {e}")
-                
-        return ticket_id
+            vals['application_file'] = photo_data
+            if file_name: vals['application_file_name'] = file_name
+        elif file_data:
+            vals['application_file'] = file_data
+            if file_name: vals['application_file_name'] = file_name
+        return self.execute_kw('repair.order', 'create', [vals], {'context': {'mail_notrack': True}})
 
-    def create_attachment(self, name, model, res_id, datas):
-        """Create an attachment for a record."""
-        vals = {
-            'name': name,
-            'datas': datas, # base64 string
-            'res_model': model,
-            'res_id': int(res_id),
-            'type': 'binary', 
-        }
-        return self.execute_kw('ir.attachment', 'create', [vals])
+    def update_repair(self, order_id, vals):
+        """Update repair order fields."""
+        return self.execute_kw('repair.order', 'write', [[int(order_id)], vals], {'context': {'mail_notrack': True}})
 
-    def get_helpdesk_teams(self):
-        """Fetch all helpdesk teams."""
-        return self.search_read(
-            'helpdesk.team',
-            [('active', '=', True)],
-            ['id', 'name']
-        )
+    def get_employee_repairs(self, employee_id, offset=0, limit=5):
+        """Fetch repair orders submitted by the employee."""
+        return self.execute_kw(
+            'repair.order', 'search_read',
+            [[('applicant', '=', int(employee_id))]],
+            {
+                'fields': ['id', 'name', 'application_name', 'state', 'create_date'],
+                'offset': offset,
+                'limit': limit,
+                'order': 'id desc'
+            }
+        ) or []
 
-    def get_departments(self, parent_id=None):
-        """Fetch departments. If parent_id is provided, fetch children. Else fetch root departments."""
-        if parent_id:
-            domain = [('parent_id', '=', int(parent_id))]
-        else:
-            domain = [('parent_id', '=', False)]
-        return self.search_read('hr.department', domain, ['id', 'name', 'parent_id'], limit=100)
+    def get_assigned_repairs(self, employee_id, state=None, offset=0, limit=10):
+        """Fetch repair orders assigned to the employee (usta)."""
+        domain = [('designated_employee', '=', int(employee_id))]
+        if state:
+            domain.append(('state', '=', state))
+        return self.execute_kw(
+            'repair.order', 'search_read',
+            [domain],
+            {
+                'fields': ['id', 'name', 'application_name', 'state', 'create_date',
+                           'applicant', 'department', 'application_file', 'application_file_name', 'schedule_date'],
+                'offset': offset,
+                'limit': limit,
+                'order': 'id desc'
+            }
+        ) or []
+
+    def get_repair_counts(self, employee_id):
+        """Get count of repair orders per state for the assigned employee."""
+        domain = [('designated_employee', '=', int(employee_id))]
+        return self.execute_kw('repair.order', 'read_group', [domain, ['state'], ['state']]) or []
+
+    # --- EMPLOYEE ---
 
     def get_employee_by_phone(self, phone):
-        """Search employee by mobile or work phone."""
-        domain = ['|', ('mobile_phone', '=', phone), ('work_phone', '=', phone)]
-        result = self.search_read('hr.employee', domain, ['id', 'name', 'department_id', 'x_studio_telegram_id'], limit=1)
-        return result[0] if result else None
+        """Search employee by mobile or work phone with normalization."""
+        if not phone:
+            return None
+        
+        normalized_input = re.sub(r'\D', '', str(phone))
+        # Fetch all employees with phone fields to compare locally due to inconsistent Odoo formatting
+        employees = self.search_read('hr.employee', [], ['id', 'name', 'department_id', 'telegram_id', 'mobile_phone', 'work_phone'], limit=None)
+        
+        if employees:
+            for emp in employees:
+                m_phone = emp.get('mobile_phone')
+                w_phone = emp.get('work_phone')
+                
+                # Check normalized match on suffix (last 9 digits are usually enough for UZ)
+                if m_phone and re.sub(r'\D', '', str(m_phone)).endswith(normalized_input[-9:]):
+                    return emp
+                if w_phone and re.sub(r'\D', '', str(w_phone)).endswith(normalized_input[-9:]):
+                    return emp
+                    
+        return None
 
     def get_employee_by_telegram_id(self, telegram_id):
         """Search employee by Telegram ID."""
-        domain = [('x_studio_telegram_id', '=', str(telegram_id))]
-        result = self.search_read('hr.employee', domain, ['id', 'name', 'department_id', 'mobile_phone', 'job_title'], limit=1)
+        domain = [('telegram_id', '=', str(telegram_id))]
+        result = self.search_read('hr.employee', domain, ['id', 'name', 'department_id', 'mobile_phone'], limit=1)
         return result[0] if result else None
-
-    def create_employee(self, name, department_id, phone, telegram_id, job_title="Employee"):
-        """Create a new employee record."""
-        vals = {
-            'name': name,
-            'department_id': int(department_id),
-            'mobile_phone': phone,
-            'work_phone': phone,
-            'x_studio_telegram_id': str(telegram_id),
-            'job_title': job_title 
-        }
-        return self.execute_kw('hr.employee', 'create', [vals])
 
     def update_employee_telegram_id(self, employee_id, telegram_id):
         """Update telegram ID for an existing employee."""
-        return self.execute_kw('hr.employee', 'write', [[employee_id], {'x_studio_telegram_id': str(telegram_id)}])
-
-    def get_employee_tickets(self, employee_id, offset=0, limit=5):
-        """Fetch tickets created by the employee."""
-        return self.execute_kw(
-            'helpdesk.ticket',
-            'search_read',
-            [[('x_studio_ariza_yuboruvchi', '=', int(employee_id))]],
-            {
-                'fields': ['id', 'name', 'stage_id', 'x_studio_berilgan_sana', 'x_studio_ariza_raqami'],
-                'offset': offset,
-                'limit': limit,
-                'order': 'id desc'
-            }
-        )
-
-    # --- USTA (MASTER) FEATURES ---
+        return self.execute_kw('hr.employee', 'write', [[employee_id], {'telegram_id': str(telegram_id)}])
 
     def is_usta(self, employee_id):
-        """Check if employee is a Usta."""
-        employee = self.execute_kw(
-            'hr.employee',
-            'read',
-            [[int(employee_id)]],
-            {'fields': ['x_studio_usta']}
-        )
-        return employee[0].get('x_studio_usta', False) if employee else False
+        """Check if employee is a Master (Usta)."""
+        employee = self.execute_kw('hr.employee', 'read', [[int(employee_id)]], {'fields': ['is_master']})
+        return employee[0].get('is_master', False) if employee else False
 
-    def get_managed_teams(self, employee_id):
-        """Get IDs of teams where the employee is responsible (masul xodim)."""
-        teams = self.search_read(
-            'helpdesk.team',
-            [('x_studio_masul_xodim', '=', int(employee_id))],
-            ['id', 'name']
-        )
-        return [t['id'] for t in teams]
-
-    def get_team_tickets(self, team_ids, stage_id=None, offset=0, limit=10):
-        """Fetch tickets for the teams."""
-        if not team_ids:
-            return []
-            
-        domain = [('team_id', 'in', team_ids)]
-        if stage_id:
-            domain.append(('stage_id', '=', int(stage_id)))
-            
-        return self.execute_kw(
-            'helpdesk.ticket',
-            'search_read',
-            [domain],
-            {
-                'fields': ['id', 'name', 'stage_id', 'x_studio_berilgan_sana', 'description', 'close_date', 'sla_deadline', 'write_date', 'x_studio_ariza_raqami', 'x_studio_ariza_yuboruvchi', 'x_studio_binary_field_9hi_1jg9o8v5j', 'x_studio_bolim', 'x_studio_related_field_2pj_1jg9o6rpt'],
-                'offset': offset,
-                'limit': limit,
-                'order': 'id desc'
-            }
-        )
-
-    def get_task_counts(self, team_ids):
-        """Get count of tickets per stage for managed teams."""
-        if not team_ids:
-            return []
-            
-        domain = [('team_id', 'in', team_ids)]
-        # We need to group by stage_id. read_group is best.
-        return self.execute_kw(
-            'helpdesk.ticket',
-            'read_group',
-            [domain, ['stage_id'], ['stage_id']],
-        )
-
-    def update_ticket(self, ticket_id, vals):
-        """Update ticket fields."""
-        return self.execute_kw('helpdesk.ticket', 'write', [[int(ticket_id)], vals])
+    def get_departments(self, parent_id=None):
+        """Fetch departments."""
+        domain = [('parent_id', '=', int(parent_id))] if parent_id else [('parent_id', '=', False)]
+        return self.search_read('hr.department', domain, ['id', 'name', 'parent_id'], limit=100)
