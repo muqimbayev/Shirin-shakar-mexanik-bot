@@ -647,7 +647,7 @@ async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     now_utc = datetime.datetime.utcnow()
     finished_odoo = now_utc.strftime('%Y-%m-%d')
     finished_tg = (now_utc + datetime.timedelta(hours=5)).strftime('%Y-%m-%d %H:%M:%S')
-    vals = {'state': 'done', 'report_description': report_text, 'finished_date': finished_odoo}
+    vals = {'state': 'under_repair', 'report_description': report_text, 'finished_date': finished_odoo}
     if file_data:
         vals['report_file'] = file_data
         if file_name: vals['report_file_name'] = file_name
@@ -686,7 +686,15 @@ async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     'finished_date': finished_tg
                 }
                 if TELEGRAM_GROUP_ID:
-                    await send_ticket_notification(context, TELEGRAM_GROUP_ID, notif_data, "✅ <b>Ariza hal qilindi!</b>")
+                    group_keyboard = [
+                        [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"chief_approve_{order_id}"), 
+                         InlineKeyboardButton("❌ Rad etish", callback_data=f"chief_reject_{order_id}")]
+                    ]
+                    await send_ticket_notification(
+                        context, TELEGRAM_GROUP_ID, notif_data, 
+                        "✅ <b>Ariza hal qilindi!</b>\nTasdiqlanishi kutilmoqda...", 
+                        reply_markup=InlineKeyboardMarkup(group_keyboard)
+                    )
                 sender_id = t_data.get('applicant')
                 if sender_id:
                     emp = client.execute_kw('hr.employee', 'read', [[sender_id[0]]], {'fields': ['telegram_id']})
@@ -710,6 +718,63 @@ async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         logger.error(f"Error solving order {order_id}: {e}")
         await update.message.reply_text("Xatolik yuz berdi.", reply_markup=get_main_menu_keyboard(context))
     return ConversationHandler.END
+
+async def chief_approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    client = OdooClient()
+    chief_name = client.get_chief_mechanic_name(user_id)
+    if not chief_name:
+        await query.answer("Siz tasdiqlash uchun huquqqa ega emassiz.", show_alert=True)
+        return
+
+    data_parts = query.data.split('_')
+    action = data_parts[1]
+    order_id = data_parts[2]
+    
+    current_text = query.message.text or query.message.caption or ""
+    
+    if action == "approve":
+        try:
+            client.update_repair(int(order_id), {'state': 'done'})
+            await query.answer("Tasdiqlandi!")
+            new_text = current_text.replace("Tasdiqlanishi kutilmoqda...", f"✅ <b>{chief_name} tomonidan tasdiqlandi.</b>")
+            if query.message.text:
+                await query.edit_message_text(new_text, parse_mode="HTML")
+            else:
+                await query.edit_message_caption(caption=new_text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Approval error: {e}")
+    elif action == "reject":
+        try:
+            client.update_repair(int(order_id), {'state': 'under_repair'})
+            await query.answer("Rad etildi!")
+            new_text = current_text.replace("Tasdiqlanishi kutilmoqda...", f"❌ <b>{chief_name} tomonidan rad etildi!</b>")
+            if query.message.text:
+                await query.edit_message_text(new_text, parse_mode="HTML")
+            else:
+                await query.edit_message_caption(caption=new_text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Rejection error: {e}")
+
+    # Notify the designated Usta
+    try:
+        order_info = client.execute_kw('repair.order', 'read', [[int(order_id)]], {'fields': ['name', 'designated_employee']})
+        if order_info:
+            ticket_name = order_info[0].get('name', 'Noma`lum')
+            desig_emp = order_info[0].get('designated_employee')
+            if desig_emp:
+                emp_info = client.execute_kw('hr.employee', 'read', [[desig_emp[0]]], {'fields': ['telegram_id']})
+                if emp_info and emp_info[0].get('telegram_id'):
+                    usta_tg_id = emp_info[0]['telegram_id']
+                    if action == "approve":
+                        msg = f"✅ <b>{ticket_name}</b> raqamli ariza bo'yicha bajargan ishingiz bosh mexanik ({chief_name}) tasdiqladi."
+                    else:
+                        msg = f"❌ <b>{ticket_name}</b> raqamli ariza bo'yicha bajargan ishingiz bosh mexanik ({chief_name}) rad etdi. Iltimos jarayonga qayting."
+                    await context.bot.send_message(chat_id=int(usta_tg_id), text=msg, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error notifying Usta: {e}")
 
 # --- RATING SYSTEM ---
 
@@ -820,6 +885,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Regex("^🛠 Mening vazifalarim$"), my_tasks))
     application.add_handler(CallbackQueryHandler(my_tasks_pagination, pattern="^(usta_tasks_|usta_cat_|usta_back_cats)"))
     application.add_handler(CallbackQueryHandler(task_details, pattern="^usta_task_"))
+    application.add_handler(CallbackQueryHandler(chief_approval_callback, pattern="^chief_"))
 
     usta_conv_handler = ConversationHandler(
         entry_points=[

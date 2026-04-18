@@ -140,6 +140,14 @@ class OdooClient:
         employee = self.execute_kw('hr.employee', 'read', [[int(employee_id)]], {'fields': ['is_master']})
         return employee[0].get('is_master', False) if employee else False
 
+    def get_chief_mechanic_name(self, telegram_id):
+        """Check if employee linked to Telegram ID is Chief Mechanic and return their Odoo name."""
+        domain = [('telegram_id', '=', str(telegram_id))]
+        emp = self.search_read('hr.employee', domain, ['x_studio_chief_mechanic', 'name'], limit=1)
+        if emp and emp[0].get('x_studio_chief_mechanic'):
+            return emp[0].get('name')
+        return False
+
     def get_departments(self, parent_id=None):
         """Fetch departments."""
         domain = [('parent_id', '=', int(parent_id))] if parent_id else [('parent_id', '=', False)]
