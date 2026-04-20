@@ -11,8 +11,8 @@ class OdooClient:
         self.db = ODOO_DB
         self.username = ODOO_USER
         self.password = ODOO_PASSWORD
-        self.common = xmlrpc.client.ServerProxy('{}/xmlrpc/2/common'.format(self.url))
-        self.models = xmlrpc.client.ServerProxy('{}/xmlrpc/2/object'.format(self.url))
+        self.common = xmlrpc.client.ServerProxy('{}/xmlrpc/2/common'.format(self.url), allow_none=True)
+        self.models = xmlrpc.client.ServerProxy('{}/xmlrpc/2/object'.format(self.url), allow_none=True)
         self.uid = None
 
     def authenticate(self):

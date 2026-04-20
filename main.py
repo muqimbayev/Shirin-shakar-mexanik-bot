@@ -120,10 +120,9 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             f"🆔 <b>ID:</b> {ticket_data.get('name', ticket_data.get('id', '?'))}\n"
             f"👤 <b>Yuboruvchi:</b> {ticket_data.get('sender_name', 'Noma`lum')}\n"
             f"🏢 <b>Bo'lim:</b> {ticket_data.get('department_name', 'Noma`lum')}\n"
-            f"📝 <b>Mavzu:</b> {ticket_data.get('application_name', '-')}\n"
+            f"📝 <b>Muammo:</b> {description or ticket_data.get('application_name', '-')}\n"
             f"🔧 <b>Usta:</b> {ticket_data.get('usta_name', 'Belgilanmagan')}\n\n"
-            f"<b>{emodji}</b> {priority}\n"
-            f"📄 <b>Batafsil:</b> {description}\n\n"
+            f"<b>{emodji}</b> {priority}\n\n"
             f"📅 <b>Sana:</b> {ticket_data.get('create_date', 'Noma`lum')}\n"
         )
         if ticket_data.get('deadline'):
@@ -357,7 +356,11 @@ async def show_tickets_page(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     for t in tickets:
         state_label = STATE_LABELS.get(t.get('state'), t.get('state', 'Yangi'))
         date = t.get('create_date', '')
-        msg += f"🆔 <b>{t.get('name', t['id'])}</b> | {date}\n📝 {t.get('application_name', '-')}\n📊 Holat: {state_label}\n\n"
+        desc_short = t.get('application_description', t.get('application_name', '-'))
+        def clean_html(raw): return re.sub(re.compile('<.*?>'), '', raw) if raw else '-'
+        desc_short = clean_html(desc_short)
+        if len(desc_short) > 50: desc_short = desc_short[:50] + "..."
+        msg += f"🆔 <b>{t.get('name', t['id'])}</b> | {date}\n📝 {desc_short}\n📊 Holat: {state_label}\n\n"
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton("⬅️ Oldingi", callback_data=f"my_tickets_prev_{page}"))
@@ -398,11 +401,11 @@ async def show_task_categories(update: Update, context: ContextTypes.DEFAULT_TYP
         if state:
             counts[state] = item.get('state_count', 0)
     categories = [
-        ('draft', "🆕 Yangi"),
+        # ('draft', "🆕 Yangi"),
         ('confirmed', "🆕 Biriktirilgan"),
         ('under_repair', "⏳ Jarayonda"),
         ('done', "✅ Hal qilingan"),
-        ('cancel', "🚫 Bekor qilingan"),
+        # ('cancel', "🚫 Bekor qilingan"),
     ]
     keyboard = []
     for state, label in categories:
@@ -427,10 +430,13 @@ async def show_tasks_page(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         deadline = ticket.get('schedule_date') or ""
         icon = "🔴" if deadline else "🟢"
         order_num = ticket.get('name', str(ticket['id']))
-        app_name = ticket.get('application_name', '-')
         dept = ticket.get('department')
         dept_label = dept[1][:20] if dept and isinstance(dept, list) else '-'
-        msg += f"{icon} <b>{order_num}</b> | {app_name}\n"
+        app_desc = ticket.get('application_description', ticket.get('application_name', '-'))
+        def clean_html(raw): return re.sub(re.compile('<.*?>'), '', raw) if raw else '-'
+        app_desc = clean_html(app_desc)
+        if len(app_desc) > 30: app_desc = app_desc[:30] + "..."
+        msg += f"{icon} <b>{order_num}</b> | {app_desc}\n"
         keyboard.append([InlineKeyboardButton(f"👁 {order_num} | {dept_label}", callback_data=f"usta_task_{ticket['id']}")])
     nav_row = []
     if page > 0:
@@ -509,8 +515,7 @@ async def task_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"👤 <b>Yuboruvchi:</b> {sender_name}\n"
             f"🏢 <b>Bo'lim:</b> {department}\n"
             f"📞 <b>Tel:</b> {phone}\n"
-            f"📝 <b>Mavzu:</b> {order.get('application_name', '-')}\n\n"
-            f"📄 <b>Batafsil:</b> {desc}\n"
+            f"📝 <b>Muammo:</b> {desc or order.get('application_name', '-')}\n\n"
             f"📊 <b>Holat:</b> {state_label}\n\n"
             f"📅 <b>Sana:</b> {order.get('create_date') or 'Noma`lum'}\n"
             f"⏳ <b>Muddat:</b> {deadline}\n"
