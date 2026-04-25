@@ -141,6 +141,16 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
         file_name = ticket_data.get('file_name') or ("photo.jpg" if photo_b64 else "file.dat")
         
         data_to_send = photo_b64 or file_b64
+
+        if str(chat_id) == str(TELEGRAM_GROUP_ID) and ticket_data.get('id'):
+            url_button = InlineKeyboardButton("🔗 Odoo'da ko'rish", url=f"https://www.erp-shirin-shakar.uz/odoo/repairs/{ticket_data['id']}")
+            if reply_markup is None:
+                reply_markup = InlineKeyboardMarkup([[url_button]])
+            elif getattr(reply_markup, 'inline_keyboard', None) is not None:
+                new_keyboard = list(reply_markup.inline_keyboard)
+                new_keyboard.append([url_button])
+                reply_markup = InlineKeyboardMarkup(new_keyboard)
+
         await send_any_media(context, chat_id, data_to_send, file_name, msg, reply_markup)
     except Exception as e:
         logger.error(f"Error sending notification to {chat_id}: {e}")
