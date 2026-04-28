@@ -151,9 +151,10 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
                 new_keyboard.append([url_button])
                 reply_markup = InlineKeyboardMarkup(new_keyboard)
 
-        await send_any_media(context, chat_id, data_to_send, file_name, msg, reply_markup)
+        return await send_any_media(context, chat_id, data_to_send, file_name, msg, reply_markup)
     except Exception as e:
         logger.error(f"Error sending notification to {chat_id}: {e}")
+        return None
 
 # --- REGISTRATION ---
 
@@ -331,7 +332,19 @@ async def ticket_priority_choice(update: Update, context: ContextTypes.DEFAULT_T
                     'priority': t_data.get('priority_custom')
                 }
                 if TELEGRAM_GROUP_ID:
-                    await send_ticket_notification(context, TELEGRAM_GROUP_ID, notif_data, "🆕 <b>Yangi Ariza!</b>")
+                        message_id = await send_ticket_notification(
+                            context, TELEGRAM_GROUP_ID, notif_data, "🆕 <b>Yangi Ariza!</b>"
+                        )
+                        
+                        # message_id va chat_id ni Odoo ga saqlaymiz
+                        if message_id:
+                            client.execute_kw(
+                                'repair.order', 'write',
+                                [[ord   er_id], {
+                                    'telegram_message_id': str(message_id),
+                                    'telegram_chat_id': str(TELEGRAM_GROUP_ID)
+                                }]
+                            )
         except Exception as e:
             logger.error(f"Error sending notifications: {e}")
             import traceback; traceback.print_exc()
@@ -705,11 +718,21 @@ async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"chief_approve_{order_id}"), 
                          InlineKeyboardButton("❌ Rad etish", callback_data=f"chief_reject_{order_id}")]
                     ]
-                    await send_ticket_notification(
+                    sent_msg = await send_ticket_notification(
                         context, TELEGRAM_GROUP_ID, notif_data, 
                         "✅ <b>Ariza hal qilindi!</b>\nTasdiqlanishi kutilmoqda...", 
                         reply_markup=InlineKeyboardMarkup(group_keyboard)
                     )
+                    # Yuborilgan xabarning message_id va chat_id ni Odoo ga yozamiz
+                    if sent_msg:
+                        try:
+                            client.update_repair(order_id, {
+                                'tg_group_message_id': sent_msg.message_id,
+                                'tg_group_chat_id': str(sent_msg.chat_id)
+                            })
+                            logger.info(f"TG group message_id={sent_msg.message_id} Odoo ga saqlandi (order {order_id})")
+                        except Exception as save_err:
+                            logger.error(f"message_id Odoo ga saqlab bo'lmadi: {save_err}")
                 sender_id = t_data.get('applicant')
                 if sender_id:
                     emp = client.execute_kw('hr.employee', 'read', [[sender_id[0]]], {'fields': ['telegram_id']})
