@@ -332,19 +332,17 @@ async def ticket_priority_choice(update: Update, context: ContextTypes.DEFAULT_T
                     'priority': t_data.get('priority_custom')
                 }
                 if TELEGRAM_GROUP_ID:
-                        message_id = await send_ticket_notification(
-                            context, TELEGRAM_GROUP_ID, notif_data, "🆕 <b>Yangi Ariza!</b>"
+                    message_id, chat_id = await send_ticket_notification(
+                        context, TELEGRAM_GROUP_ID, notif_data, "🆕 <b>Yangi Ariza!</b>"
+                    )
+                    if message_id:
+                        client.execute_kw(
+                            'repair.order', 'write',
+                            [[order_id], {
+                                'telegram_message_id': str(message_id),
+                                'telegram_chat_id': str(chat_id)
+                            }]
                         )
-                        
-                        # message_id va chat_id ni Odoo ga saqlaymiz
-                        if message_id:
-                            client.execute_kw(
-                                'repair.order', 'write',
-                                [[ord   er_id], {
-                                    'telegram_message_id': str(message_id),
-                                    'telegram_chat_id': str(TELEGRAM_GROUP_ID)
-                                }]
-                            )
         except Exception as e:
             logger.error(f"Error sending notifications: {e}")
             import traceback; traceback.print_exc()
