@@ -23,6 +23,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info(f"Loaded TELEGRAM_GROUP_ID: {TELEGRAM_GROUP_ID}")
 
+# O'zbekiston vaqt zonasi (UTC+5)
+TASHKENT_OFFSET = datetime.timedelta(hours=5)
+
+def utc_to_tashkent(date_str: str) -> str:
+    """Odoo UTC vaqtni O'zbekiston vaqtiga (UTC+5) o'tkazish."""
+    if not date_str:
+        return "Noma'lum"
+    try:
+        # Odoo odatda '2026-05-05 10:07:40' formatda qaytaradi
+        dt = datetime.datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+        dt_local = dt + TASHKENT_OFFSET
+        return dt_local.strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, TypeError):
+        try:
+            # Faqat sana formatini ham tekshiramiz: '2026-05-05'
+            dt = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+            dt_local = dt + TASHKENT_OFFSET
+            return dt_local.strftime('%Y-%m-%d %H:%M:%S')
+        except (ValueError, TypeError):
+            return date_str
+
 # State label mapping for repair.order
 STATE_LABELS = {
     'draft': 'Yangi',
@@ -123,7 +144,7 @@ async def send_ticket_notification(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             f"📝 <b>Muammo:</b> {description or ticket_data.get('application_name', '-')}\n"
             f"🔧 <b>Usta:</b> {ticket_data.get('usta_name', 'Belgilanmagan')}\n\n"
             f"<b>{emodji}</b> {priority}\n\n"
-            f"📅 <b>Sana:</b> {ticket_data.get('create_date', 'Noma`lum')}\n"
+            f"📅 <b>Sana:</b> {utc_to_tashkent(ticket_data.get('create_date', ''))}\n"
         )
         if ticket_data.get('deadline'):
             msg += f"⏳ <b>Muddat:</b> {ticket_data['deadline']}\n"
@@ -325,22 +346,23 @@ async def ticket_priority_choice(update: Update, context: ContextTypes.DEFAULT_T
                     'id': t_data['id'], 'name': t_data['name'],
                     'application_name': t_data.get('application_name', '-'),
                     'application_description': description or '',
-                    'create_date': t_data.get('create_date', ''),
+                    'create_date': t_data.get('create_date', ''),  # utc_to_tashkent qo'llaniladi send_ticket_notification ichida
                     'sender_name': employee['name'], 'department_name': dept,
                     'usta_name': usta_name, 'photo': photo_data,
                     'file': file_data, 'file_type': file_type, 'file_name': file_name,
                     'priority': t_data.get('priority_custom')
                 }
                 if TELEGRAM_GROUP_ID:
-                    message_id, chat_id = await send_ticket_notification(
+                    result = await send_ticket_notification(
                         context, TELEGRAM_GROUP_ID, notif_data, "🆕 <b>Yangi Ariza!</b>"
                     )
-                    if message_id:
+                    # ← faqat shu qism o'zgardi
+                    if result:
                         client.execute_kw(
                             'repair.order', 'write',
                             [[order_id], {
-                                'telegram_message_id': str(message_id),
-                                'telegram_chat_id': str(chat_id)
+                                'telegram_message_id': str(result.message_id),
+                                'telegram_chat_id': str(result.chat_id)
                             }]
                         )
         except Exception as e:
@@ -376,7 +398,7 @@ async def show_tickets_page(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     msg = "📂 <b>Sizning arizalaringiz:</b>\n\n"
     for t in tickets:
         state_label = STATE_LABELS.get(t.get('state'), t.get('state', 'Yangi'))
-        date = t.get('create_date', '')
+        date = utc_to_tashkent(t.get('create_date', ''))
         desc_short = t.get('application_description', t.get('application_name', '-'))
         def clean_html(raw): return re.sub(re.compile('<.*?>'), '', raw) if raw else '-'
         desc_short = clean_html(desc_short)
@@ -538,7 +560,7 @@ async def task_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"📞 <b>Tel:</b> {phone}\n"
             f"📝 <b>Muammo:</b> {desc or order.get('application_name', '-')}\n\n"
             f"📊 <b>Holat:</b> {state_label}\n\n"
-            f"📅 <b>Sana:</b> {order.get('create_date') or 'Noma`lum'}\n"
+            f"📅 <b>Sana:</b> {utc_to_tashkent(order.get('create_date', ''))}\n"
             f"⏳ <b>Muddat:</b> {deadline}\n"
         )
         keyboard = []
