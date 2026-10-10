@@ -6,6 +6,9 @@ from config import ODOO_URL, ODOO_DB, ODOO_USER, ODOO_PASSWORD
 logger = logging.getLogger(__name__)
 
 class OdooClient:
+    # Login natijasi barcha OdooClient() lar uchun umumiy — har handler'da qayta login qilinmaydi
+    _shared_uid = None
+
     def __init__(self):
         self.url = ODOO_URL
         self.db = ODOO_DB
@@ -13,11 +16,12 @@ class OdooClient:
         self.password = ODOO_PASSWORD
         self.common = xmlrpc.client.ServerProxy('{}/xmlrpc/2/common'.format(self.url), allow_none=True)
         self.models = xmlrpc.client.ServerProxy('{}/xmlrpc/2/object'.format(self.url), allow_none=True)
-        self.uid = None
+        self.uid = OdooClient._shared_uid
 
     def authenticate(self):
         try:
             self.uid = self.common.authenticate(self.db, self.username, self.password, {})
+            OdooClient._shared_uid = self.uid or None
             if self.uid:
                 logger.info(f"Successfully authenticated with Odoo. UID: {self.uid}")
                 return True
@@ -35,6 +39,16 @@ class OdooClient:
             kwargs = {}
         try:
             return self.models.execute_kw(self.db, self.uid, self.password, model, method, args, kwargs)
+        except xmlrpc.client.Fault as e:
+            # Odoo qayta ishga tushgan / sessiya eskirgan bo'lsa — bir marta qayta login qilib urinamiz
+            if 'AccessDenied' in str(e) and self.authenticate():
+                try:
+                    return self.models.execute_kw(self.db, self.uid, self.password, model, method, args, kwargs)
+                except Exception as e2:
+                    logger.error(f"Error executing {method} on {model}: {e2}")
+                    return None
+            logger.error(f"Error executing {method} on {model}: {e}")
+            return None
         except Exception as e:
             logger.error(f"Error executing {method} on {model}: {e}")
             return None
@@ -148,7 +162,80 @@ class OdooClient:
             return emp[0].get('name')
         return False
 
+    def get_all_usta_telegram_ids(self):
+        """Fetch all mechanics (is_master=True) with their telegram IDs and names."""
+        domain = [('is_master', '=', True), ('telegram_id', '!=', False)]
+        result = self.search_read(
+            'hr.employee', domain,
+            ['id', 'name', 'telegram_id'],
+            limit=100
+        )
+        return result or []
+
     def get_departments(self, parent_id=None):
         """Fetch departments."""
         domain = [('parent_id', '=', int(parent_id))] if parent_id else [('parent_id', '=', False)]
         return self.search_read('hr.department', domain, ['id', 'name', 'parent_id'], limit=100)
+
+    def get_monthly_score(self, employee_id):
+        """Joriy oy uchun ustaning ballarini qaytaradi (mechanic.score.line)."""
+        import datetime
+        today = datetime.date.today()
+        first_day = today.replace(day=1).strftime('%Y-%m-%d')
+        if today.month == 12:
+            last_day = today.replace(year=today.year + 1, month=1, day=1) - datetime.timedelta(days=1)
+        else:
+            last_day = today.replace(month=today.month + 1, day=1) - datetime.timedelta(days=1)
+        last_day = last_day.strftime('%Y-%m-%d')
+        domain = [
+            ('employee_id', '=', int(employee_id)),
+            ('date', '>=', first_day),
+            ('date', '<=', last_day),
+        ]
+        return self.execute_kw(
+            'mechanic.score.line', 'search_read', [domain],
+            {'fields': ['points', 'score_type', 'note', 'bonus_amount', 'date', 'repair_id'], 'order': 'date desc'}
+        ) or []
+
+    def get_repair_statistics(self):
+        """Har bir usta bo'yicha yopilmagan, bekor qilingan va qabul qilinmagan arizalar sonini qaytaradi."""
+        # Barcha yopilmagan arizalar (done va cancel dan tashqari)
+        open_orders = self.execute_kw(
+            'repair.order', 'search_read',
+            [[('state', 'not in', ['done', 'cancel'])]],
+            {'fields': ['id', 'name', 'state', 'designated_employee'], 'order': 'id desc'}
+        ) or []
+
+        # Bekor qilingan arizalar (oxirgi 30 kun)
+        import datetime
+        thirty_days_ago = (datetime.date.today() - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+        cancelled_orders = self.execute_kw(
+            'repair.order', 'search_read',
+            [[('state', '=', 'cancel'), ('create_date', '>=', thirty_days_ago)]],
+            {'fields': ['id', 'name', 'designated_employee'], 'order': 'id desc'}
+        ) or []
+
+        stats = {}  # {employee_id: {'name': ..., 'open': 0, 'unassigned': 0}}
+
+        for order in open_orders:
+            desig = order.get('designated_employee')
+            if desig and isinstance(desig, list):
+                emp_id, emp_name = desig[0], desig[1]
+            else:
+                emp_id, emp_name = 0, '— Tayinlanmagan —'
+
+            if emp_id not in stats:
+                stats[emp_id] = {'name': emp_name, 'open': 0, 'unassigned': 0}
+            if emp_id == 0:
+                stats[0]['unassigned'] = stats[0].get('unassigned', 0) + 1
+            else:
+                stats[emp_id]['open'] += 1
+
+        return {
+            'per_mechanic': stats,
+            'open_total': len(open_orders),
+            'unassigned_total': sum(1 for o in open_orders if not o.get('designated_employee')),
+            'cancelled_30d': len(cancelled_orders),
+        }
+
+

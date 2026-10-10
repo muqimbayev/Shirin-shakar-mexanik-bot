@@ -230,18 +230,70 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    import datetime
     user = update.effective_user
     client = OdooClient()
     employee = client.get_employee_by_telegram_id(user.id)
-    if employee:
-        dept_name = employee['department_id'][1] if employee.get('department_id') else "Belgilanmagan"
-        phone = employee.get('mobile_phone') or "Yo'q"
-        await update.message.reply_html(
-            f"👤 <b>Profilingiz:</b>\n\n📛 <b>Ism:</b> {employee['name']}\n"
-            f"🏢 <b>Bo'lim:</b> {dept_name}\n📞 <b>Telefon:</b> {phone}\n"
-        )
-    else:
+    if not employee:
         await update.message.reply_text("Siz ro'yxatdan o'tmagansiz. /start bosing.")
+        return
+
+    dept_name = employee['department_id'][1] if employee.get('department_id') else "Belgilanmagan"
+    phone = employee.get('mobile_phone') or "Yo'q"
+    is_usta = client.is_usta(employee['id'])
+
+    msg = (
+        f"👤 <b>Profilingiz:</b>\n\n"
+        f"📛 <b>Ism:</b> {employee['name']}\n"
+        f"🏢 <b>Bo'lim:</b> {dept_name}\n"
+        f"📞 <b>Telefon:</b> {phone}\n"
+    )
+
+    # Usta uchun joriy oy ballarini ko'rsatish
+    if is_usta:
+        score_lines = client.get_monthly_score(employee['id'])
+        now = datetime.date.today()
+        month_names = {
+            1: 'Yanvar', 2: 'Fevral', 3: 'Mart', 4: 'Aprel',
+            5: 'May', 6: 'Iyun', 7: 'Iyul', 8: 'Avgust',
+            9: 'Sentabr', 10: 'Oktabr', 11: 'Noyabr', 12: 'Dekabr'
+        }
+        month_label = f"{month_names[now.month]} {now.year}"
+
+        total_points = sum(s.get('points', 0) for s in score_lines)
+        total_bonus = sum(s.get('bonus_amount', 0) for s in score_lines)
+
+        score_type_labels = {
+            'rating': '⭐ Mijoz bahosi',
+            'acceptance': '✅ Qabul qilish',
+            'completion': '🏁 Yakunlash',
+            'penalty': '⚠️ Jarima',
+        }
+
+        msg += f"\n📊 <b>{month_label} — Ball hisobi:</b>\n"
+        if score_lines:
+            msg += f"🏆 <b>Jami ball:</b> {total_points} ball\n"
+            msg += f"💰 <b>Jami bonus:</b> {int(total_bonus):,} so'm\n\n"
+            msg += "<b>Batafsil:</b>\n"
+            for s in score_lines[:10]:  # Eng ko'pi 10 ta ko'rsatamiz
+                type_label = score_type_labels.get(s.get('score_type', ''), s.get('score_type', ''))
+                note = s.get('note') or ''
+                pts = s.get('points', 0)
+                bonus = int(s.get('bonus_amount', 0))
+                sign = '+' if pts >= 0 else ''
+                msg += f"  {type_label}: <b>{sign}{pts}</b> ball"
+                if bonus:
+                    msg += f" | {bonus:,} so'm"
+                if note:
+                    msg += f"\n  <i>{note}</i>"
+                msg += "\n"
+            if len(score_lines) > 10:
+                msg += f"  <i>... va yana {len(score_lines) - 10} ta yozuv</i>\n"
+        else:
+            msg += "  Bu oyda hali ball yig'ilmagan.\n"
+
+    await update.message.reply_html(msg)
+
 
 def get_main_menu_keyboard(context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["🛠 Ariza qoldirish", "📂 Mening arizalarim"], ["👤 Profil"]]
@@ -346,25 +398,62 @@ async def ticket_priority_choice(update: Update, context: ContextTypes.DEFAULT_T
                     'id': t_data['id'], 'name': t_data['name'],
                     'application_name': t_data.get('application_name', '-'),
                     'application_description': description or '',
-                    'create_date': t_data.get('create_date', ''),  # utc_to_tashkent qo'llaniladi send_ticket_notification ichida
+                    'create_date': t_data.get('create_date', ''),
                     'sender_name': employee['name'], 'department_name': dept,
                     'usta_name': usta_name, 'photo': photo_data,
                     'file': file_data, 'file_type': file_type, 'file_name': file_name,
                     'priority': t_data.get('priority_custom')
                 }
+                # Guruhga xabar yuborish
                 if TELEGRAM_GROUP_ID:
                     result = await send_ticket_notification(
-                        context, TELEGRAM_GROUP_ID, notif_data, "🆕 <b>Yangi Ariza!</b>"
+                        context, TELEGRAM_GROUP_ID, notif_data, "🆕 <b>Yangi Ariza!</b>\n⏳ Usta kutilmoqda..."
                     )
-                    # ← faqat shu qism o'zgardi
                     if result:
                         client.execute_kw(
                             'repair.order', 'write',
                             [[order_id], {
-                                'telegram_message_id': str(result.message_id),
-                                'telegram_chat_id': str(result.chat_id)
+                                'tg_group_message_id': result.message_id,
+                                'tg_group_chat_id': str(result.chat_id)
                             }]
                         )
+
+                # Barcha ustalarga shaxsiy xabar yuborish (faqat Zarur va Shoshilinch emas uchun)
+                if odoo_priority in ('2', '3'):  # 1=Taklif — ustalarga yuborilmaydi
+                  try:
+                    all_ustas = client.get_all_usta_telegram_ids()
+                    accept_keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Qabul qilaman", callback_data=f"usta_accept_{order_id}")]
+                    ])
+                    # bot_data da pending_assignments saqlash
+                    if 'pending_assignments' not in context.bot_data:
+                        context.bot_data['pending_assignments'] = {}
+                    context.bot_data['pending_assignments'][str(order_id)] = {
+                        'usta_messages': [],  # [(chat_id, message_id, has_media), ...]
+                        'notif_data': notif_data,
+                        'group_has_media': bool(photo_data or file_data),
+                    }
+                    for usta in all_ustas:
+                        usta_tg_id = usta.get('telegram_id')
+                        if not usta_tg_id:
+                            continue
+                        try:
+                            usta_tg_id_int = int(usta_tg_id)
+                            sent = await send_ticket_notification(
+                                context, usta_tg_id_int, notif_data,
+                                "🆕 <b>Yangi ariza tushdi!</b>\nQabul qilish uchun tugmani bosing:",
+                                reply_markup=accept_keyboard
+                            )
+                            if sent:
+                                has_media = bool(sent.photo or sent.video or sent.document)
+                                context.bot_data['pending_assignments'][str(order_id)]['usta_messages'].append(
+                                    (usta_tg_id_int, sent.message_id, has_media)
+                                )
+                        except Exception as usta_err:
+                            logger.error(f"Ustaga ({usta.get('name')}) xabar yuborishda xatolik: {usta_err}")
+                  except Exception as usta_notify_err:
+                    logger.error(f"Ustalarga xabar yuborishda xatolik: {usta_notify_err}")
+                    import traceback; traceback.print_exc()
         except Exception as e:
             logger.error(f"Error sending notifications: {e}")
             import traceback; traceback.print_exc()
@@ -614,11 +703,12 @@ async def usta_deadline_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             orders_data = client.execute_kw(
                 'repair.order', 'search_read', [[('id', '=', order_id)]],
                 {'fields': ['id', 'name', 'application_name', 'application_description',
-                            'create_date', 'applicant', 'department'], 'limit': 1}
+                            'create_date', 'applicant', 'department', 'designated_employee'], 'limit': 1}
             )
             if orders_data:
                 t_data = orders_data[0]
-                usta_name = update.effective_user.full_name
+                desig = t_data.get('designated_employee')
+                usta_name = desig[1] if desig and isinstance(desig, list) else update.effective_user.full_name
                 dept = t_data['department'][1] if t_data.get('department') and isinstance(t_data['department'], list) else "Noma'lum"
                 notif_data = {
                     'id': t_data['id'], 'name': t_data['name'],
@@ -647,11 +737,13 @@ async def solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await query.answer()
     order_id = int(query.data.split("_")[-1])
     context.user_data['usta_ticket_id'] = order_id
+    # Original xabarni o'chirmay/tahrirlamay — faqat pastdan javob qilamiz
     await query.message.reply_text(
-        "Bajarilgan ish bo'yicha hisobot yozing:",
+        "📝 Bajarilgan ish bo'yicha hisobot yozing:",
         reply_markup=ReplyKeyboardMarkup([["Ortga"]], resize_keyboard=True)
     )
     return USTA_REPORT
+
 
 async def usta_report_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text
@@ -713,11 +805,13 @@ async def finish_solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             orders_data = client.execute_kw(
                 'repair.order', 'search_read', [[('id', '=', order_id)]],
                 {'fields': ['id', 'name', 'application_name', 'application_description',
-                            'create_date', 'applicant', 'department', 'priority_custom', 'report_file_name'], 'limit': 1}
+                            'create_date', 'applicant', 'department', 'priority_custom',
+                            'report_file_name', 'designated_employee'], 'limit': 1}
             )
             if orders_data:
                 t_data = orders_data[0]
-                usta_name = update.effective_user.full_name
+                desig = t_data.get('designated_employee')
+                usta_name = desig[1] if desig and isinstance(desig, list) else update.effective_user.full_name
                 dept = t_data['department'][1] if t_data.get('department') and isinstance(t_data['department'], list) else "Noma'lum"
                 notif_data = {
                     'id': t_data['id'], 'name': t_data['name'],
@@ -806,7 +900,18 @@ async def chief_approval_callback(update: Update, context: ContextTypes.DEFAULT_
             logger.error(f"Approval error: {e}")
     elif action == "reject":
         try:
-            client.update_repair(int(order_id), {'state': 'under_repair'})
+            # mechanic_cancel_count ni 1 ga oshirish
+            order_data = client.execute_kw(
+                'repair.order', 'read', [[int(order_id)]],
+                {'fields': ['mechanic_cancel_count']}
+            )
+            current_count = 0
+            if order_data:
+                current_count = order_data[0].get('mechanic_cancel_count', 0) or 0
+            client.update_repair(int(order_id), {
+                'state': 'under_repair',
+                'mechanic_cancel_count': current_count + 1
+            })
             await query.answer("Rad etildi!")
             new_text = current_text.replace("Tasdiqlanishi kutilmoqda...", f"❌ <b>{chief_name} tomonidan rad etildi!</b>")
             if query.message.text:
@@ -833,6 +938,170 @@ async def chief_approval_callback(update: Update, context: ContextTypes.DEFAULT_
                     await context.bot.send_message(chat_id=int(usta_tg_id), text=msg, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Error notifying Usta: {e}")
+
+# --- USTA ACCEPT CALLBACK ---
+
+async def usta_accept_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Usta 'Qabul qilaman' tugmasini bosganida."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    order_id_str = query.data.split("_")[-1]
+    order_id = int(order_id_str)
+
+    client = OdooClient()
+    # Ustani tekshirish
+    employee = client.get_employee_by_telegram_id(user_id)
+    if not employee or not client.is_usta(employee['id']):
+        await query.answer("Siz usta sifatida ro'yxatdan o'tmagansiz.", show_alert=True)
+        return
+
+    # Odoo'da designated_employee tekshirish — allaqachon olinganmi?
+    orders = client.execute_kw(
+        'repair.order', 'search_read',
+        [[('id', '=', order_id)]],
+        {'fields': ['id', 'name', 'designated_employee', 'state', 'applicant', 'department',
+                    'application_name', 'application_description', 'priority_custom', 'create_date',
+                    'tg_group_message_id', 'tg_group_chat_id'], 'limit': 1}
+    )
+    if not orders:
+        await query.answer("Ariza topilmadi.", show_alert=True)
+        return
+
+    order = orders[0]
+    desig = order.get('designated_employee')
+
+    if desig and desig[0] != employee['id']:
+        # Boshqa usta allaqachon qabul qilgan
+        await query.answer("Bu ariza allaqachon boshqa usta tomonidan qabul qilingan.", show_alert=True)
+        # Xabarni yangilash
+        try:
+            if query.message.text:
+                await query.edit_message_text(
+                    f"❌ Bu ariza allaqachon <b>{desig[1]}</b> tomonidan qabul qilingan.",
+                    parse_mode="HTML"
+                )
+            else:
+                await query.edit_message_caption(
+                    caption=f"❌ Bu ariza allaqachon <b>{desig[1]}</b> tomonidan qabul qilingan.",
+                    parse_mode="HTML"
+                )
+        except Exception:
+            pass
+        return
+
+    if desig and desig[0] == employee['id']:
+        await query.answer("Siz bu arizani allaqachon qabul qilgansiz.", show_alert=True)
+        return
+
+    # Ustani biriktirish
+    await query.answer("Ariza qabul qilindi!")
+    client.update_repair(order_id, {
+        'designated_employee': employee['id'],
+        'state': 'confirmed'
+    })
+    usta_name = employee['name']
+    order_name = order.get('name', str(order_id))
+
+    # 1. Faqat tugmani "Bajarish" ga almashtirish — matn o'zgarishsiz qoladi
+    try:
+        bajarish_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶️ Bajarish", callback_data=f"usta_solve_{order_id}")]
+        ])
+        await query.edit_message_reply_markup(reply_markup=bajarish_markup)
+    except Exception as e:
+        logger.error(f"Usta xabar tugmasini yangilashda xatolik: {e}")
+
+    # 2. Guruh xabarini tahrirlash — faqat usta qismini yangilash
+    try:
+        tg_msg_id = order.get('tg_group_message_id')
+        tg_chat_id = order.get('tg_group_chat_id')
+        if tg_msg_id and tg_chat_id:
+            tg_msg_id = int(tg_msg_id)
+            tg_chat_id = int(tg_chat_id)
+            accept_time = (datetime.datetime.utcnow() + TASHKENT_OFFSET).strftime('%Y-%m-%d %H:%M:%S')
+            pending_data = context.bot_data.get('pending_assignments', {}).get(str(order_id), {})
+            notif = pending_data.get('notif_data', {})
+            # Bot qayta ishga tushgan bo'lsa bot_data bo'sh — ma'lumotni Odoo'dagi arizadan olamiz
+            dept = order.get('department')
+            applicant = order.get('applicant')
+            sender_name = notif.get('sender_name') or (applicant[1] if applicant else "Noma'lum")
+            dept_name = notif.get('department_name') or (dept[1] if dept and isinstance(dept, list) else "Noma'lum")
+            has_media = pending_data.get('group_has_media', bool(notif.get('photo') or notif.get('file')))
+
+            def clean_html(raw):
+                return re.sub(re.compile('<.*?>'), '', raw) if raw else ''
+            description = clean_html(notif.get('application_description') or order.get('application_description') or '')
+            priority = notif.get('priority') or order.get('priority_custom')
+            emodji = 'Muhumlik darajasi:'
+            if priority == '1':
+                priority_label = 'Taklif'; emodji = '🟢 Muhumlik darajasi:'
+            elif priority == '2':
+                priority_label = 'Shoshilinch emas'; emodji = '🟡 Muhumlik darajasi:'
+            elif priority == '3':
+                priority_label = 'Zarur'; emodji = '🔴 Muhumlik darajasi:'
+            else:
+                priority_label = priority or ''
+
+            group_new_text = (
+                f"🆕 <b>Yangi Ariza!</b>\n"
+                f"✅ <b>{usta_name}</b> qabul qildi\n\n"
+                f"🆔 <b>ID:</b> {order_name}\n"
+                f"👤 <b>Yuboruvchi:</b> {sender_name}\n"
+                f"🏢 <b>Bo'lim:</b> {dept_name}\n"
+                f"📝 <b>Muammo:</b> {description or order.get('application_name') or '-'}\n"
+                f"🔧 <b>Usta:</b> {usta_name} ✅\n\n"
+                f"<b>{emodji}</b> {priority_label}\n\n"
+                f"📅 <b>Sana:</b> {utc_to_tashkent(order.get('create_date', ''))}\n"
+                f"🕐 <b>Qabul qilgan vaqti:</b> {accept_time}\n"
+            )
+            # Tahrirlashda "Odoo'da ko'rish" tugmasi yo'qolmasligi uchun qayta qo'shamiz
+            odoo_markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                "🔗 Odoo'da ko'rish", url=f"https://www.erp-shirin-shakar.uz/odoo/repairs/{order_id}")]])
+            # Avval ehtimoliy turini sinaymiz, xato bo'lsa ikkinchisini — ortiqcha 400 so'rovsiz
+            edits = [context.bot.edit_message_caption, context.bot.edit_message_text]
+            if not has_media:
+                edits.reverse()
+            for edit in edits:
+                try:
+                    kwargs = {'caption': group_new_text} if edit == context.bot.edit_message_caption else {'text': group_new_text}
+                    await edit(chat_id=tg_chat_id, message_id=tg_msg_id, parse_mode="HTML",
+                               reply_markup=odoo_markup, **kwargs)
+                    break
+                except Exception as edit_err:
+                    last_err = edit_err
+            else:
+                logger.error(f"Guruh xabarini tahrirlashda xatolik: {last_err}")
+    except Exception as grp_err:
+        logger.error(f"Guruh xabarini yangilashda xatolik: {grp_err}")
+
+    # 3. Boshqa ustalarga yuborilgan xabarlarni yangilash
+    try:
+        pending = context.bot_data.get('pending_assignments', {}).get(str(order_id))
+        if pending:
+            for (chat_id, msg_id, has_media) in pending.get('usta_messages', []):
+                if chat_id == user_id:
+                    continue  # O'zimizning xabarimiz — allaqachon yangilangan
+                try:
+                    done_text = f"❌ <b>{order_name}</b> raqamli ariza <b>{usta_name}</b> tomonidan qabul qilindi."
+                    if has_media:
+                        await context.bot.edit_message_caption(
+                            chat_id=chat_id, message_id=msg_id,
+                            caption=done_text, parse_mode="HTML"
+                        )
+                    else:
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id, message_id=msg_id,
+                            text=done_text, parse_mode="HTML"
+                        )
+                except Exception as edit_err:
+                    logger.error(f"Boshqa usta xabarini yangilashda xatolik (chat={chat_id}): {edit_err}")
+            # Tozalash
+            del context.bot_data['pending_assignments'][str(order_id)]
+    except Exception as pending_err:
+        logger.error(f"Pending assignments yangilashda xatolik: {pending_err}")
+
+    # 4. Ariza beruvchiga xabar YUBORILMAYDI — usta Bajarish tugmasini bosganda yuborilib so'ng yetkaziladi
+
 
 # --- RATING SYSTEM ---
 
@@ -903,6 +1172,30 @@ async def cancel_usta_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text("Bekor qilindi.", reply_markup=get_main_menu_keyboard(context))
     return ConversationHandler.END
 
+async def statistics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows repair order statistics for all mechanics."""
+    client = OdooClient()
+    try:
+        stats_data = client.get_repair_statistics()
+        
+        msg = "📊 <b>Arizalar statistikasi:</b>\n\n"
+        msg += f"📦 <b>Jami yopilmagan arizalar:</b> {stats_data['open_total']}\n"
+        msg += f"⏳ <b>Tayinlanmagan arizalar:</b> {stats_data['unassigned_total']}\n"
+        msg += f"❌ <b>Oxirgi 30 kunda bekor qilinganlar:</b> {stats_data['cancelled_30d']}\n\n"
+        msg += "<b>Usta bo'yicha yopilmagan arizalar:</b>\n"
+        
+        for emp_id, info in stats_data['per_mechanic'].items():
+            if emp_id == 0:
+                msg += f"  • <i>Tayinlanmagan:</i> <b>{info['unassigned']}</b> ta\n"
+            else:
+                msg += f"  • {info['name']}: <b>{info['open']}</b> ta\n"
+                
+        await update.message.reply_html(msg)
+    except Exception as e:
+        logger.error(f"Error fetching statistics: {e}")
+        await update.message.reply_text("Statistikani yuklashda xatolik yuz berdi.")
+
+
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN is not set.")
@@ -944,6 +1237,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(my_tasks_pagination, pattern="^(usta_tasks_|usta_cat_|usta_back_cats)"))
     application.add_handler(CallbackQueryHandler(task_details, pattern="^usta_task_"))
     application.add_handler(CallbackQueryHandler(chief_approval_callback, pattern="^chief_"))
+    application.add_handler(CallbackQueryHandler(usta_accept_callback, pattern="^usta_accept_"))
 
     usta_conv_handler = ConversationHandler(
         entry_points=[
@@ -970,6 +1264,9 @@ def main() -> None:
         allow_reentry=True
     )
     application.add_handler(rating_conv_handler)
+
+    # Add statistics command handler
+    application.add_handler(CommandHandler(["statistics", "Statistics"], statistics_command))
 
     application.run_polling()
 
