@@ -736,6 +736,16 @@ async def solve_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     order_id = int(query.data.split("_")[-1])
+    # Hisobot allaqachon yuborilgan bo'lsa qayta yuborishga yo'l qo'ymaymiz (dublikat "hal qilindi" xabarlari)
+    client = OdooClient()
+    orders = client.execute_kw('repair.order', 'read', [[order_id]], {'fields': ['state', 'finished_date']})
+    if orders:
+        if orders[0].get('state') in ('done', 'cancel'):
+            await query.message.reply_text("Bu ariza allaqachon yopilgan.")
+            return ConversationHandler.END
+        if orders[0].get('finished_date'):
+            await query.message.reply_text("Bu ariza bo'yicha hisobot allaqachon yuborilgan. Bosh mexanik tasdiqlashi kutilmoqda.")
+            return ConversationHandler.END
     context.user_data['usta_ticket_id'] = order_id
     # Original xabarni o'chirmay/tahrirlamay — faqat pastdan javob qilamiz
     await query.message.reply_text(
@@ -910,6 +920,7 @@ async def chief_approval_callback(update: Update, context: ContextTypes.DEFAULT_
                 current_count = order_data[0].get('mechanic_cancel_count', 0) or 0
             client.update_repair(int(order_id), {
                 'state': 'under_repair',
+                'finished_date': False,  # usta qayta hisobot yubora olishi uchun
                 'mechanic_cancel_count': current_count + 1
             })
             await query.answer("Rad etildi!")

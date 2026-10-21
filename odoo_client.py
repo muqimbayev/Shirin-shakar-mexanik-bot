@@ -78,7 +78,8 @@ class OdooClient:
 
     def update_repair(self, order_id, vals):
         """Update repair order fields."""
-        return self.execute_kw('repair.order', 'write', [[int(order_id)], vals], {'context': {'mail_notrack': True}})
+        # from_tg_bot: Odoo modul guruh xabarini qayta tahrirlamasin (bot o'zi tahrirlaydi)
+        return self.execute_kw('repair.order', 'write', [[int(order_id)], vals], {'context': {'mail_notrack': True, 'from_tg_bot': True}})
 
     def get_employee_repairs(self, employee_id, offset=0, limit=5):
         """Fetch repair orders submitted by the employee."""
