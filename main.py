@@ -20,6 +20,8 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+# httpx har so'rovni bot tokeni bilan logga yozadi — tokenni logdan yashirish uchun faqat ogohlantirishlar
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 logger.info(f"Loaded TELEGRAM_GROUP_ID: {TELEGRAM_GROUP_ID}")
 
@@ -1207,6 +1209,11 @@ async def statistics_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Statistikani yuklashda xatolik yuz berdi.")
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler ichidagi har qanday xatoni logga yozish (aks holda bot jim qoladi)."""
+    logger.error("Handler xatosi (update=%s)", update, exc_info=context.error)
+
+
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN is not set.")
@@ -1238,6 +1245,8 @@ def main() -> None:
             TICKET_PRIORITY: [CallbackQueryHandler(ticket_priority_choice, pattern="^priority_")],
         },
         fallbacks=[CommandHandler("cancel", cancel_ticket), MessageHandler(filters.Regex("^Bekor qilish$"), cancel_ticket)],
+        # Foydalanuvchi oldingi arizani oxiriga yetkazmagan bo'lsa ham "Ariza qoldirish" qaytadan boshlaydi
+        allow_reentry=True,
     )
     application.add_handler(ticket_conv_handler)
 
@@ -1265,6 +1274,7 @@ def main() -> None:
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel_usta_flow)],
+        allow_reentry=True,
     )
     application.add_handler(usta_conv_handler)
 
@@ -1279,6 +1289,7 @@ def main() -> None:
     # Add statistics command handler
     application.add_handler(CommandHandler(["statistics", "Statistics"], statistics_command))
 
+    application.add_error_handler(error_handler)
     application.run_polling()
 
 if __name__ == "__main__":
